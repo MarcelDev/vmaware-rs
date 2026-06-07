@@ -1,0 +1,3 @@
+[submodule "deps/vmaware"]
+	path = deps/vmaware
+	url = https://github.com/kernelwernel/VMAware
