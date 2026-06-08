@@ -8,7 +8,7 @@ The package is published as `vmaware-rs`, while the Rust library is imported as 
 
 ```toml
 [dependencies]
-vmaware-rs = "0.1"
+vmaware-rs = { git = "https://github.com/MarcelDev/vmaware-rs.git" }
 ```
 
 This crate builds a small C++17 wrapper around the vendored VMAware header. A working C++ compiler is required.
