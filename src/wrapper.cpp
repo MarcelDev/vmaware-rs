@@ -79,7 +79,7 @@ VM::flagset make_flags(const unsigned char* flags, std::size_t len) {
         VM::core::generate_all(out);
     }
 
-    for (unsigned char i = 0; i < VM::enum_size + 1; ++i) {
+    for (unsigned char i = 0; i < VM::enum_size; ++i) {
         if (VM::core::disabled_flag_collector.test(i)) {
             out.set(i, false);
         }
