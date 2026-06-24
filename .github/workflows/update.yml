@@ -1,14 +1,16 @@
-name: Update vendored VMAware header and create a new tag if applicable
+name: Sync VMAware header and create release branches
 
 on:
   schedule:
-    - cron: "0 9,21 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
   push:
     branches: [ci-test]
+
 permissions:
   contents: write
   pull-requests: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -27,11 +29,11 @@ jobs:
             | jq -r .tag_name)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Check if release tag is new
+      - name: Check if release branch exists
         id: check_tag
         run: |
-          tag="${{ steps.vmaware.outputs.tag }}"
-          if git ls-remote --tags origin | grep -q "refs/tags/$tag$"; then
+          version="${{ steps.vmaware.outputs.tag }}"
+          if git ls-remote --heads origin | grep -q "refs/heads/$version$"; then
             echo "is_new_tag=false" >> "$GITHUB_OUTPUT"
           else
             echo "is_new_tag=true" >> "$GITHUB_OUTPUT"
@@ -60,8 +62,7 @@ jobs:
         id: test
         if: steps.changed.outputs.changed == 'true'
         run: |
-            cargo run --example basic 2>&1 && echo "success=true" >> "$GITHUB_OUTPUT" || echo "success=false" >> "$GITHUB_OUTPUT"
-            
+          cargo run --example basic 2>&1 && echo "success=true" >> "$GITHUB_OUTPUT" || echo "success=false" >> "$GITHUB_OUTPUT"
 
       - name: Configure git
         if: steps.changed.outputs.changed == 'true'
@@ -69,30 +70,26 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump Cargo.toml version
-        if: steps.check_tag.outputs.is_new_tag == 'true' && steps.changed.outputs.changed == 'true'
-        run: |
-          version="${{ steps.vmaware.outputs.tag }}"
-          version="${version#v}"
-          sed -i "s/^version = .*/version = \"$version\"/" Cargo.toml
-
-      # Example ran fine, push to master and a tag
-      - name: Push to master and tag
+      - name: Push to master
         if: steps.changed.outputs.changed == 'true' && steps.test.outputs.success == 'true'
         run: |
-          git add deps/vmaware.hpp Cargo.toml
-          if [ "${{ steps.check_tag.outputs.is_new_tag }}" == "true" ]; then
-            git commit -m "chore: update VMAware to ${{ steps.vmaware.outputs.tag }}"
-            git push
-            git tag ${{ steps.vmaware.outputs.tag }}
-            git push --tags
-          else
-            git commit -m "chore: sync VMAware main (${{ steps.sha.outputs.sha }})"
-            git push
-          fi
+          git add deps/vmaware.hpp
+          git commit -m "chore: sync VMAware main (${{ steps.sha.outputs.sha }})"
+          git push
 
-      # Running the example failed, open a PR instead
-      - name: Open PR on build failure
+      - name: Create release branch
+        if: steps.check_tag.outputs.is_new_tag == 'true' && steps.test.outputs.success == 'true'
+        run: |
+          version="${{ steps.vmaware.outputs.tag }}"
+          version_clean="${version#v}"
+          git checkout -b $version
+          sed -i "s/^version = .*/version = \"$version_clean\"/" Cargo.toml
+          git add Cargo.toml
+          git commit -m "chore: bump version to $version_clean for VMAware $version"
+          git push origin $version
+          git checkout -
+
+      - name: Open PR on failure
         if: steps.changed.outputs.changed == 'true' && steps.test.outputs.success == 'false'
         uses: peter-evans/create-pull-request@v6
         with:
@@ -105,6 +102,6 @@ jobs:
           body: |
             VMAware updated, but running the example failed (runtime panic, or compile error).
             Review the changes, and fix it before merging.
-            
+
             VMAware ref: ${{ steps.vmaware.outputs.tag }}
             Main SHA: ${{ steps.sha.outputs.sha }}
