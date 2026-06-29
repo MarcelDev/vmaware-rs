@@ -1,6 +1,6 @@
 # vmaware-rs
 
-Rust bindings for [VMAware](https://github.com/kernelwernel/VMAware), a cross-platform C++ framework for virtual machine detection.
+Rust bindings for [VMAware](https://github.com/NotRequiem/VMAware), a cross-platform C++ framework for virtual machine detection.
 
 The package is published as `vmaware-rs`, while the Rust library is imported as `vmaware`.
 
