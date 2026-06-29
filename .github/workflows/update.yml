@@ -23,7 +23,7 @@ jobs:
         id: vmaware
         run: |
           set -e
-          tag=$(curl -s https://api.github.com/repos/kernelwernel/VMAware/releases/latest \
+          tag=$(curl -s https://api.github.com/repos/NotRequiem/VMAware/releases/latest \
             | jq -r .tag_name)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -40,14 +40,14 @@ jobs:
       - name: Get latest VMAware main SHA
         id: sha
         run: |
-          sha=$(curl -s https://api.github.com/repos/kernelwernel/VMAware/commits/main \
+          sha=$(curl -s https://api.github.com/repos/NotRequiem/VMAware/commits/main \
             | jq -r .sha)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Update vendored header
         run: |
           curl -fsSL -o deps/vmaware.hpp \
-            https://raw.githubusercontent.com/kernelwernel/VMAware/main/src/vmaware.hpp
+            https://raw.githubusercontent.com/NotRequiem/VMAware/main/src/vmaware.hpp
 
       - name: Check if header changed
         id: changed
