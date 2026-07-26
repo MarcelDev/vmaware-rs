@@ -3122,8 +3122,9 @@ public:
             Silver Rules (in order of priority):
             1. The trigger and the counter thread must not be in the same physical core (avoid SMT siblings) WHENEVER POSSIBLE
             2. The trigger and the counter thread should be within the same NUMA node or AMD CCD to minimize baseline latency WHENEVER POSSIBLE
-            3. The counter and trigger thread should not be in the first or last logical CPU WHENEVER POSSIBLE
-            4. If after reaching here, there are multiple valid candidates (core indexes), then randomize it to avoid hypervisors from predicting where the trigger thread is
+            3. The counter and trigger thread should be in the same type of core (P or E core) WHENEVER POSSIBLE
+            4. The counter and trigger thread should not be in the first or last logical CPU WHENEVER POSSIBLE
+            5. If after reaching here, there are multiple valid candidates (core indexes), then randomize it to avoid hypervisors from predicting where the trigger thread is
 
             Example: Imagine we have a CPU with 2 cores and 4 threads (with SMT enabled), then:
             1. We process golden rules first:
@@ -3175,8 +3176,10 @@ public:
 
             DWORD logical_to_core[64];
             DWORD logical_to_numa[64];
+            BYTE logical_to_efficiency[64];
             std::fill_n(logical_to_core, 64, INVALID_CPU);
             std::fill_n(logical_to_numa, 64, INVALID_CPU);
+            std::fill_n(logical_to_efficiency, 64, static_cast<BYTE>(0));
 
             DWORD core_count = 0;
 
@@ -3187,12 +3190,14 @@ public:
                 switch (ptr->Relationship) {
                 case RelationProcessorCore: {
                     const DWORD core_id = core_count++;
+                    const BYTE efficiency = ptr->Processor.EfficiencyClass;
 
                     for (DWORD g = 0; g < ptr->Processor.GroupCount; ++g) {
                         const KAFFINITY mask = ptr->Processor.GroupMask[g].Mask;
                         for (DWORD bit = 0; bit < 64; ++bit) {
                             if (mask & (1ull << bit)) {
                                 logical_to_core[bit] = core_id;
+                                logical_to_efficiency[bit] = efficiency;
                             }
                         }
                     }
@@ -3251,6 +3256,7 @@ public:
             const DWORD counter_logical = idxs[counter_pos0];
             const DWORD counter_core = logical_to_core[counter_logical];
             const DWORD counter_numa = logical_to_numa[counter_logical];
+            const BYTE counter_efficiency = logical_to_efficiency[counter_logical];
 
             if (counter_core == INVALID_CPU || counter_numa == INVALID_CPU) {
                 return 0ull;
@@ -3269,7 +3275,11 @@ public:
                     logical_to_numa[logical] == counter_numa;
             };
 
-            auto build_candidates = [&](bool require_same_numa, bool avoid_edges) {
+            auto same_core_type = [&](DWORD logical) noexcept -> bool {
+                return logical_to_efficiency[logical] == counter_efficiency;
+            };
+
+            auto build_candidates = [&](bool require_same_numa, bool require_same_core, bool avoid_edges) {
                 std::vector<DWORD> out;
                 out.reserve(n);
 
@@ -3292,6 +3302,10 @@ public:
                         continue;
                     }
 
+                    if (require_same_core && !same_core_type(logical)) {
+                        continue;
+                    }
+
                     out.push_back(logical);
                 }
 
@@ -3299,14 +3313,22 @@ public:
             };
 
             // priority order
-            // 1) different physical core + same NUMA + not first/last
-            // 2) different physical core + same NUMA
-            // 3) different physical core + not first/last
-            // 4) different physical core
-            std::vector<DWORD> candidates = build_candidates(true, true);
-            if (candidates.empty()) candidates = build_candidates(true, false);
-            if (candidates.empty()) candidates = build_candidates(false, true);
-            if (candidates.empty()) candidates = build_candidates(false, false);
+            // 1) diff core + same NUMA + same core type + not first/last
+            // 2) diff core + same NUMA + same core type
+            // 3) diff core + same NUMA + not first/last
+            // 4) diff core + same NUMA
+            // 5) diff core + same core type + not first/last
+            // 6) diff core + same core type
+            // 7) diff core + not first/last
+            // 8) diff core
+            std::vector<DWORD> candidates = build_candidates(true, true, true);
+            if (candidates.empty()) candidates = build_candidates(true, true, false);
+            if (candidates.empty()) candidates = build_candidates(true, false, true);
+            if (candidates.empty()) candidates = build_candidates(true, false, false);
+            if (candidates.empty()) candidates = build_candidates(false, true, true);
+            if (candidates.empty()) candidates = build_candidates(false, true, false);
+            if (candidates.empty()) candidates = build_candidates(false, false, true);
+            if (candidates.empty()) candidates = build_candidates(false, false, false);
 
             if (candidates.empty()) {
                 return 0ull;
@@ -3923,11 +3945,15 @@ public:
             // check whether a hypervisor is nested within a Hyper-V partition
             auto is_hyperv_nested = []() noexcept -> bool {
                 u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
-                cpu::cpuid(eax, ebx, ecx, edx, 0x40000004);
 
-                const bool nested_partition_bit = (eax & (1u << 12)) != 0;
+                cpu::cpuid(eax, ebx, ecx, edx, 0x40000001);
+                if (eax != 0x31237648) // Hv#1 interface
+                    return false;
 
-                return nested_partition_bit;
+                cpu::cpuid(eax, ebx, ecx, edx, 0x40000006); // hypervisor level of the current guest
+                const u32 guest_level = (eax >> 10) & 0xF;
+
+                return guest_level != 0;
             };
 
             // check if the Windows Hypervisor Platform interface is responsive and confirms a running hypervisor
@@ -5743,8 +5769,8 @@ public:
             const HANDLE current_thread = reinterpret_cast<HANDLE>(-2LL);
             const HANDLE current_process = reinterpret_cast<HANDLE>(-1LL);
             const DWORD_PTR old_affinity = SetThreadAffinityMask(current_thread, trigger_affinity);
-            const int old_thread_priority = GetThreadPriority(current_thread);
             const DWORD old_process_priority = GetPriorityClass(current_process);
+            const int old_thread_priority = GetThreadPriority(current_thread);
             SetPriorityClass(current_process, ABOVE_NORMAL_PRIORITY_CLASS); // ABOVE_NORMAL_PRIORITY_CLASS + THREAD_PRIORITY_HIGHEST = 12 base priority
             SetThreadPriority(current_thread, THREAD_PRIORITY_HIGHEST);
             SetThreadPriorityBoost(current_thread, TRUE); // disable dynamic thread priority adjustments by Windows, not turbo boosts by the hardware itself
@@ -12846,13 +12872,6 @@ public:
                 }
 
                 const u8* payload = event_ptr + local_offset;
-
-                if (pcrIndex == 0 && eventType == 0x00000008) {
-                    if (eventSize == 2 && payload[0] == 0x00 && payload[1] == 0x00) {
-                        debug("MEASURED_BOOT: Detected null payload");
-                        return true;
-                    }
-                }
 
                 if (pcrIndex == 0 && eventType == 0x80000008) {
                     if (eventSize >= 16) {
