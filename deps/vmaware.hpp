@@ -12627,91 +12627,78 @@ public:
             return false;
         }
 
-        constexpr std::array<std::array<u8, 4>, 5> opcodes{ {
-            { 0x0F, 0x01, 0xD8, 0xC3 }, // VMRUN
-            { 0x0F, 0x01, 0xDA, 0xC3 }, // VMLOAD
-            { 0x0F, 0x01, 0xDB, 0xC3 }, // VMSAVE
-            { 0x0F, 0x01, 0xDD, 0xC3 }, // CLGI
-            { 0x0F, 0x01, 0xDF, 0xC3 }  // INVLPGA
-        } };
-
+        constexpr std::array<u8, 4> vmload_opcode = { 0x0F, 0x01, 0xDA, 0xC3 };
         constexpr SIZE_T opcode_size = 4;
         const HANDLE current_process = reinterpret_cast<HANDLE>(-1);
 
-        for (const auto& opcode : opcodes) {
-            PVOID base_address = nullptr;
-            SIZE_T region_size = 0x1000;
+        PVOID base_address = nullptr;
+        SIZE_T region_size = 0x1000;
 
-            auto free_region = [&]() {
-                if (base_address) {
-                    SIZE_T free_size = 0;
-                    nt_free_virtual_memory(current_process, &base_address, &free_size, MEM_RELEASE);
-                    base_address = nullptr;
-                }
-            };
-
-            NTSTATUS status = nt_allocate_virtual_memory(
-                current_process,
-                &base_address,
-                0,
-                &region_size,
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_EXECUTE_READWRITE
-            );
-
-            if (!NT_SUCCESS(status)) {
-                continue;
+        auto free_region = [&]() {
+            if (base_address) {
+                SIZE_T free_size = 0;
+                nt_free_virtual_memory(current_process, &base_address, &free_size, MEM_RELEASE);
+                base_address = nullptr;
             }
+        };
 
-            memcpy(base_address, opcode.data(), opcode_size);
-            nt_flush_instruction_cache(current_process, base_address, opcode_size);
+        NTSTATUS status = nt_allocate_virtual_memory(
+            current_process,
+            &base_address,
+            0,
+            &region_size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE
+        );
 
-            ULONG old_protect = 0;
-            PVOID protect_address = base_address;
-            SIZE_T protect_size = region_size;
-
-            status = nt_protect_virtual_memory(
-                current_process,
-                &protect_address,
-                &protect_size,
-                PAGE_EXECUTE_READ,
-                &old_protect
-            );
-
-            if (!NT_SUCCESS(status)) {
-                free_region();
-                continue;
-            }
-
-            nt_flush_instruction_cache(current_process, base_address, opcode_size);
-
-            DWORD exception_status = 0;
-            bool fault_hit = false;
-
-            __try {
-                reinterpret_cast<void(*)()>(base_address)();
-            }
-            __except (exception_status = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
-                fault_hit = true;
-            }
-
-            free_region();
-
-            if (!fault_hit) {
-                continue;
-            }
-
-            if (exception_status == EXCEPTION_ILLEGAL_INSTRUCTION) {
-                continue;
-            }
-
-            if (!svmcpuid_visible) {
-                debug("SVM_EXCEPTIONS: Detected SVM hypervisor hiding CPU capabilities");
-                return core::add(brand_enum::NULL_BRAND, 150);
-            }
-
-            return true;
+        if (!NT_SUCCESS(status)) {
+            return false;
         }
+
+        memcpy(base_address, vmload_opcode.data(), opcode_size);
+        nt_flush_instruction_cache(current_process, base_address, opcode_size);
+
+        ULONG old_protect = 0;
+        PVOID protect_address = base_address;
+        SIZE_T protect_size = region_size;
+
+        status = nt_protect_virtual_memory(
+            current_process,
+            &protect_address,
+            &protect_size,
+            PAGE_EXECUTE_READ,
+            &old_protect
+        );
+
+        if (!NT_SUCCESS(status)) {
+            free_region();
+            return false;
+        }
+
+        nt_flush_instruction_cache(current_process, base_address, opcode_size);
+
+        DWORD exception_status = 0;
+        bool fault_hit = false;
+
+        __try {
+            reinterpret_cast<void(*)()>(base_address)();
+        }
+        __except (exception_status = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+            fault_hit = true;
+        }
+
+        free_region();
+
+        if (exception_status == EXCEPTION_ILLEGAL_INSTRUCTION) {
+            return false;
+        }
+
+        if (!svmcpuid_visible || !fault_hit) {
+            debug("SVM_EXCEPTIONS: Detected SVM hypervisor hiding CPU capabilities");
+            return core::add(brand_enum::NULL_BRAND, 150);
+        }
+
+        return true;
     #endif
         return false;
     }
