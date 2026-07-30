@@ -372,12 +372,14 @@
     #include <devpkey.h>
     #include <devguid.h>
     #include <bcrypt.h>
+    #include <winhvplatform.h>
 
     #pragma comment(lib, "setupapi.lib")
     #pragma comment(lib, "powrprof.lib")
     #pragma comment(lib, "advapi32.lib")
     #pragma comment(lib, "gdi32.lib")
     #pragma comment(lib, "user32.lib")
+
 #elif (LINUX)
     #if (x86)
         #include <cpuid.h>
@@ -626,7 +628,6 @@ public:
         SINGLE_STEP,
         EIP_OVERFLOW,
         SVM_EXCEPTIONS,
-        HYPERV_NESTED,
         MEASURED_BOOT,
         TPM_PASSTHROUGH, 
 
@@ -815,7 +816,7 @@ public:
     static u16 technique_count; /* get total number of techniques */
 
     static std::vector<enum_flags> disabled_techniques;
-    static constexpr std::array<enum_flags, 1> experimental_techniques{ { TPM_PASSTHROUGH } };
+    static constexpr std::array<enum_flags, 1> experimental_techniques{ { TIMER } };
 
 #if (WINDOWS)
     using brand_score_t = i32;
@@ -868,15 +869,27 @@ public:
 
     /* Various cpu operation stuff */
     struct cpu {
-        /* Cpuid leaf values */
+        /* cpuid leaf values */
         struct leaf {
             static constexpr u32
+                basic_info = 0x00000000,
+                features = 0x00000001,
+                ext_features = 0x00000007,
+                ext_topology = 0x0000000B,
+                v2_ext_topology = 0x0000001F,
+                hypervisor = 0x40000000,
+                hv_interface = 0x40000001,
+                hv_privileges = 0x40000003,
+                hv_processors = 0x40000005,
+                hv_nested = 0x40000006,
+                hv_enlightenment = 0x40000100,
                 func_ext = 0x80000000,
                 proc_ext = 0x80000001,
                 brand1 = 0x80000002,
                 brand2 = 0x80000003,
                 brand3 = 0x80000004,
-                hypervisor = 0x40000000,
+                ext_limits = 0x80000008,
+                encrypted_mem = 0x8000001F,
                 amd_easter_egg = 0x8fffffff;
         };
 
@@ -967,13 +980,13 @@ public:
             u32 unused = 0;
             bool supported = false;
 
-            if (p_leaf < 0x40000000) {
+            if (p_leaf < cpu::leaf::hypervisor) {
                 /* Standard range: 0x00000000 - 0x3FFFFFFF */
-                cpu::cpuid(eax, unused, unused, unused, 0x00000000);
+                cpu::cpuid(eax, unused, unused, unused, cpu::leaf::basic_info);
                 debug("CPUID: max standard leaf = 0x", std::hex, eax);
                 supported = (p_leaf <= eax);
             }
-            else if (p_leaf < 0x80000000) {
+            else if (p_leaf < cpu::leaf::func_ext) {
                 /* Hypervisor range: 0x40000000 - 0x7FFFFFFF */
                 cpu::cpuid(eax, unused, unused, unused, cpu::leaf::hypervisor);
                 debug("CPUID: max hypervisor leaf = 0x", std::hex, eax);
@@ -999,7 +1012,7 @@ public:
 
             u32 unused = 0;
             u32 ecx = 0;
-            cpuid(unused, unused, ecx, unused, 0);
+            cpuid(unused, unused, ecx, unused, cpu::leaf::basic_info);
 
             return ecx == authentic_amd_ecx || ecx == amdisbetter_ecx;
         }
@@ -1010,7 +1023,7 @@ public:
 
             u32 unused = 0;
             u32 ecx = 0;
-            cpuid(unused, unused, ecx, unused, 0);
+            cpuid(unused, unused, ecx, unused, cpu::leaf::basic_info);
 
             return ((ecx == intel_ecx1) || (ecx == intel_ecx2));
         }
@@ -1055,24 +1068,46 @@ public:
         #endif
         }
 
-        [[nodiscard]] static std::string cpu_manufacturer(const u32 leaf_id) {
+        [[nodiscard]] static const char* cpu_manufacturer(const u32 leaf_id) {
+            static const char* leaf_40000000 = nullptr;
+            static const char* leaf_40000100 = nullptr;
+
+            const char** cache = nullptr;
+
+            switch (leaf_id) {
+                case cpu::leaf::hypervisor:
+                    cache = &leaf_40000000;
+                    break;
+                case cpu::leaf::hv_enlightenment:
+                    cache = &leaf_40000100;
+                    break;
+                default:
+                    return "";
+            }
+
+            if (*cache) {
+                return *cache;
+            }
+
             u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
             cpu::cpuid(eax, ebx, ecx, edx, leaf_id);
 
-            if (ebx == 0 && ecx == 0 && edx == 0) return "";
-
-            u32 regs[3] = { 0 };
-            if (leaf_id >= 0x40000000) {
-                regs[0] = ebx; regs[1] = ecx; regs[2] = edx;
-            }
-            else {
-                regs[0] = ebx; regs[1] = edx; regs[2] = ecx;
+            if (ebx == 0 && ecx == 0 && edx == 0) {
+                *cache = "";
+                return *cache;
             }
 
-            char buffer[13];
-            memcpy(buffer, regs, sizeof(regs));
-            buffer[12] = '\0';
-            return { buffer };
+            static char buffers[2][13];
+
+            const size_t index = (leaf_id == cpu::leaf::hypervisor) ? 0 : 1;
+
+            u32 regs[3] = { ebx, ecx, edx };
+
+            memcpy(buffers[index], regs, sizeof(regs));
+            buffers[index][12] = '\0';
+
+            *cache = buffers[index];
+            return *cache;
         }
 
         struct stepping_struct {
@@ -1087,7 +1122,7 @@ public:
             u32 unused = 0;
             u32 eax = 0;
 
-            cpu::cpuid(eax, unused, unused, unused, 1);
+            cpu::cpuid(eax, unused, unused, unused, cpu::leaf::features);
             VMAWARE_UNUSED(unused);
 
             steps.model = ((eax >> 4) & 0b1111);
@@ -4302,22 +4337,32 @@ public:
         }
 
 
-        [[nodiscard]] static bool is_running_under_translator() {
+        [[nodiscard]] static bool is_x86_process_on_arm() {
+        #if (WINDOWS)
+            const char* brand = cpu::get_brand();
+            if (brand && strstr(brand, "Virtual CPU")) {
+                return true;
+            }
+        #endif
+
         #if (WINDOWS && _WIN32_WINNT >= _WIN32_WINNT_WIN10)
             const HANDLE current_process = reinterpret_cast<HANDLE>(-1LL);
-            USHORT procMachine = 0, nativeMachine = 0;
-            const auto pIsWow64Process2 = &IsWow64Process2;
+            USHORT proc_machine = 0, native_machine = 0;
 
-            if (pIsWow64Process2(current_process, &procMachine, &nativeMachine)) {
-                if (nativeMachine == IMAGE_FILE_MACHINE_ARM64 &&
-                    (procMachine == IMAGE_FILE_MACHINE_AMD64 || procMachine == IMAGE_FILE_MACHINE_I386)) {
-                    debug("Translator detected x64/x86 process on ARM64");
+            const auto is_wow64_process_2 = &IsWow64Process2;
+            if (is_wow64_process_2(current_process, &proc_machine, &native_machine)) {
+                const bool translated =
+                    (native_machine == IMAGE_FILE_MACHINE_ARM64 && (proc_machine == IMAGE_FILE_MACHINE_AMD64 || proc_machine == IMAGE_FILE_MACHINE_I386)) 
+                    ||
+                    (native_machine == IMAGE_FILE_MACHINE_ARMNT && proc_machine == IMAGE_FILE_MACHINE_I386);
+
+                if (translated) {
                     return true;
                 }
             }
 
-            /* Only if we got MACHINE_UNKNOWN on process but native is ARM64 */
-            if (nativeMachine == IMAGE_FILE_MACHINE_ARM64) {
+            /* Fallback */
+            if (native_machine == IMAGE_FILE_MACHINE_ARM64 || native_machine == IMAGE_FILE_MACHINE_ARMNT) {
                 using get_process_information_fn = BOOL(__stdcall*)(HANDLE, PROCESS_INFORMATION_CLASS, PVOID, DWORD);
                 const HMODULE ntdll = memory::get_ntdll();
                 if (ntdll == nullptr) {
@@ -4328,17 +4373,17 @@ public:
                 void* functions[ARRAYSIZE(function_names)] = {};
                 memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
-                get_process_information_fn get_proc_info = reinterpret_cast<get_process_information_fn>(functions[0]);
+                auto get_proc_info = reinterpret_cast<get_process_information_fn>(functions[0]);
                 if (get_proc_info) {
                     struct PROCESS_MACHINE_INFORMATION {
                         USHORT ProcessMachine;
                         USHORT Res0;
                         DWORD  MachineAttributes;
                     } pmInfo = {};
-                    /* ProcessMachineTypeInfo == 9 per MS Q&A */
-                    if (get_proc_info(current_process, (PROCESS_INFORMATION_CLASS)9, &pmInfo, sizeof(pmInfo))) {
-                        if (pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_AMD64 || pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_I386) {
-                            debug("Translator detected x64/x86 process on ARM64 by fallback");
+
+                    constexpr auto process_machine_type_info = static_cast<PROCESS_INFORMATION_CLASS>(9);
+                    if (get_proc_info(current_process, process_machine_type_info, &pmInfo, sizeof(pmInfo))) {
+                        if (pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_I386 || (native_machine == IMAGE_FILE_MACHINE_ARM64 && pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_AMD64)) {
                             return true;
                         }
                     }
@@ -4348,20 +4393,13 @@ public:
 
             if (cpu::is_leaf_supported(cpu::leaf::hypervisor)) {
                 const std::string vendor = cpu::cpu_manufacturer(cpu::leaf::hypervisor);
-                
+
                 if (vendor == "VirtualApple" ||   /* Apple Rosetta */
                     vendor == "PowerVM Lx86")     /* IBM PowerVM Lx86 */
                 {
                     return true;
                 }
             }
-
-        #if (WINDOWS)
-            const char* brand = cpu::get_brand();
-            if (brand && strstr(brand, "Virtual CPU")) {
-                return true;
-            }
-        #endif
 
             return false;
         }
@@ -4391,7 +4429,7 @@ public:
             /* Check if hypervisor feature bit in CPUID Leaf 1, ECX bit 31 is enabled */
             auto is_hyperv_present = []() noexcept -> bool {
                 u32 unused, ecx = 0;
-                cpu::cpuid(unused, unused, ecx, unused, 1);
+                cpu::cpuid(unused, unused, ecx, unused, cpu::leaf::features);
 
                 return (ecx >> 31) & 1;
             };
@@ -4402,7 +4440,7 @@ public:
              */
             auto is_root_partition = []() noexcept -> bool {
                 u32 ebx, unused = 0;
-                cpu::cpuid(unused, ebx, unused, unused, 0x40000003);
+                cpu::cpuid(unused, ebx, unused, unused, cpu::leaf::hv_privileges);
 
                 return (ebx & 1);
             };
@@ -4426,11 +4464,11 @@ public:
             auto is_hyperv_nested = []() noexcept -> bool {
                 u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
 
-                cpu::cpuid(eax, ebx, ecx, edx, 0x40000001);
+                cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::hv_interface);
                 if (eax != 0x31237648) /* Hv#1 interface */
                     return false;
 
-                cpu::cpuid(eax, ebx, ecx, edx, 0x40000006); /* hypervisor level of the current guest */
+                cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::hv_nested); /* hypervisor level of the current guest */
                 const u32 guest_level = (eax >> 10) & 0xF;
 
                 return guest_level != 0;
@@ -4494,7 +4532,7 @@ public:
             }
             else {
                 if (!is_root_partition()) {
-                    const std::string enlightenment_str = cpu::cpu_manufacturer(cpu::leaf::hypervisor + 0x100); /* 0x40000100 */
+                    const std::string enlightenment_str = cpu::cpu_manufacturer(cpu::leaf::hv_enlightenment);
 
                     if (util::find(enlightenment_str, "KVM")) {
                         debug("HYPER-X: Detected Hyper-V enlightenments");
@@ -4714,7 +4752,7 @@ public:
                 static const bool supported = []() noexcept -> bool {
                 #if (x86)
                     i32 regs[4];
-                    cpu::cpuid(regs, 1);
+                    cpu::cpuid(regs, cpu::leaf::features);
                     return (regs[2] & (1 << 20)) != 0;
                 #else
                     return false;
@@ -5183,11 +5221,11 @@ public:
     #if (!x86)
         return false;
     #else
-        return (
-            cpu::vmid_template(0) ||
-            cpu::vmid_template(cpu::leaf::hypervisor) || /* 0x40000000 */
-            cpu::vmid_template(cpu::leaf::hypervisor + 0x100) /* 0x40000100 */
-        );
+         return (
+             cpu::vmid_template(cpu::leaf::basic_info) ||
+             cpu::vmid_template(cpu::leaf::hypervisor) ||
+             cpu::vmid_template(cpu::leaf::hv_enlightenment)
+         );
     #endif
     }
 
@@ -5260,7 +5298,7 @@ public:
         u32 ecx = 0; 
         u32 edx = 0;
 
-        cpu::cpuid(eax, ebx, ecx, edx, 1); 
+        cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::features);
         constexpr u32 HYPERVISOR_MASK = (1u << 31);
         const hyperx_state state = util::hyper_x();
 
@@ -5345,15 +5383,13 @@ public:
             }
 
             /* Technique 3: Check for absence of AMD easter egg for K7 and K8 CPUs */
-            constexpr u32 AMD_EASTER_EGG = 0x8fffffff; /* this is the CPUID leaf of the AMD easter egg */
-
-            if (!cpu::is_leaf_supported(AMD_EASTER_EGG)) {
+            if (!cpu::is_leaf_supported(cpu::leaf::amd_easter_egg)) {
                 return false;
             }
 
             u32 unused = 0;
             u32 eax = 0;
-            cpu::cpuid(eax, unused, unused, unused, 1);
+            cpu::cpuid(eax, unused, unused, unused, cpu::leaf::features);
 
             auto is_k7 = [](const u32 eax) noexcept -> bool {
                 if ((eax & 0x0FF00F00) != 0x00000600) {
@@ -5380,7 +5416,7 @@ public:
             }
 
             u32 ecx_bochs = 0;
-            cpu::cpuid(unused, unused, ecx_bochs, unused, AMD_EASTER_EGG);
+            cpu::cpuid(unused, unused, ecx_bochs, unused, cpu::leaf::amd_easter_egg);
 
             if (ecx_bochs == 0) {
                 return true;
@@ -5691,19 +5727,19 @@ public:
         u32 ebx = 0;
         u32 ecx = 0;
         u32 edx = 0;
-        cpu::cpuid(eax, ebx, ecx, edx, 0x40000001);
+        cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::hv_interface);
 
         constexpr u32 simplevisor = 0x00766853; /* " vhS" */
 
-        debug("CPUID_SIGNATURE: eax = ", eax);
+        debug("CPUID_SIGNATURE: eax = ", std::hex, eax);
 
         if (eax == simplevisor) {
             return core::add(brand_enum::SIMPLEVISOR);
         }
 
         if (cpu::is_intel()) {
-            const bool has_leaf_b = cpu::is_leaf_supported(0x0B);
-            const bool has_leaf_1f = cpu::is_leaf_supported(0x1F);
+            const bool has_leaf_b = cpu::is_leaf_supported(cpu::leaf::ext_topology);
+            const bool has_leaf_1f = cpu::is_leaf_supported(cpu::leaf::v2_ext_topology);
 
             /* If neither extended topology leaf is supported, we can't perform the check */
             if (!has_leaf_b && !has_leaf_1f) {
@@ -5736,18 +5772,18 @@ public:
              * leaf 1's Initial APIC ID is the ABA guard
              */
             for (;;) {
-                cpu::cpuid(l1_eax, l1_ebx, l1_ecx, l1_edx, 1, 0);
+                cpu::cpuid(l1_eax, l1_ebx, l1_ecx, l1_edx, cpu::leaf::features, 0);
                 aba_start = (l1_ebx >> 24) & 0xFF; /* Initial APIC ID */
 
                 if (has_leaf_b) {
-                    cpu::cpuid(vb_eax, vb_ebx, vb_ecx, vb_edx, 0x0B, 0);
+                    cpu::cpuid(vb_eax, vb_ebx, vb_ecx, vb_edx, cpu::leaf::ext_topology, 0);
                 }
 
                 if (has_leaf_1f) {
-                    cpu::cpuid(v1f_eax, v1f_ebx, v1f_ecx, v1f_edx, 0x1F, 0);
+                    cpu::cpuid(v1f_eax, v1f_ebx, v1f_ecx, v1f_edx, cpu::leaf::v2_ext_topology, 0);
                 }
 
-                cpu::cpuid(unused, l1_ebx, unused, unused, 1, 0);
+                cpu::cpuid(unused, l1_ebx, unused, unused, cpu::leaf::features, 0);
                 aba_end = (l1_ebx >> 24) & 0xFF;
 
                 if (aba_start == aba_end || ++retries >= 8) { break; }
@@ -5796,7 +5832,7 @@ public:
             }
         }
         else if (cpu::is_amd()) {
-            const bool has_leaf_7 = cpu::is_leaf_supported(7);
+            const bool has_leaf_7 = cpu::is_leaf_supported(cpu::leaf::ext_features);
 
             if (!has_leaf_7) {
                 return false;
@@ -5806,7 +5842,7 @@ public:
             u32 l7_ebx = 0;
             u32 l7_ecx = 0;
             u32 l7_edx = 0;
-            cpu::cpuid(l7_eax, l7_ebx, l7_ecx, l7_edx, 7, 0);
+            cpu::cpuid(l7_eax, l7_ebx, l7_ecx, l7_edx, cpu::leaf::ext_features, 0);
 
             /*
              * Intel enumerates hardware mitigations in Leaf 7.0.EDX:
@@ -5844,7 +5880,7 @@ public:
         u32 unused = 0;
         u32 ecx = 0; 
         u32 edx = 0;
-        cpu::cpuid(unused, unused, ecx, edx, 0x40000003);
+        cpu::cpuid(unused, unused, ecx, edx, cpu::leaf::hv_privileges);
 
         constexpr u32 ECX_SIG = 0x4D4D5645u; /* 'EVMM' -> 0x4D4D5645 */
         constexpr u32 EDX_SIG = 0x43544E49u; /* 'INTC' -> 0x43544E49 */
@@ -5867,15 +5903,17 @@ public:
     #if (x86 && WINDOWS)
         using timer = struct timer;
 
-        if (util::is_running_under_translator()) {
-            debug("TIMER: Running inside a binary translation layer");
+        if (util::is_x86_process_on_arm()) {
+            debug("BINARY_TRANSLATOR: Running inside a binary translation layer");
             return false;
         }
 
         /* Calculation of minimum threshold */
         double threshold = 2.5;
+        bool check_nested_hypervisors = false;
         if (util::hyper_x() == HYPERV_HOST) {
             threshold = 50.0;
+            check_nested_hypervisors = true;
         }
 
         /* Shared state and results */
@@ -5923,7 +5961,7 @@ public:
             if (serialize_available) {
                 /* SERIALIZE requires Ice Lake or newer */
                 u32 l7_eax = 0, l7_ebx = 0, l7_ecx = 0, l7_edx = 0;
-                cpu::cpuid(l7_eax, l7_ebx, l7_ecx, l7_edx, 7, 0);
+                cpu::cpuid(l7_eax, l7_ebx, l7_ecx, l7_edx, cpu::leaf::ext_features, 0);
                 if (!(l7_edx & (1u << 14))) {
                     serialize_available = false;
                 }
@@ -5968,22 +6006,206 @@ public:
             };
 
             std::mt19937 gen(seq);
-            std::uniform_int_distribution<size_t> batch_dist(30000, 70000);
+            std::uniform_int_distribution<size_t> batch_dist(10000, 30000);
             const size_t batch_size = batch_dist(gen);
-
-            SleepEx(0, FALSE); /* try to get fresh quantum before starting warm-up phase, give time to the kernel to setup priorities */
 
             std::vector<timer::timer_tick_t> vm_samples(batch_size), ref_samples(batch_size); /* pre page-fault MMU, we won't warm-up cpuid samples for the P-states intentionally */
             VirtualLock(vm_samples.data(), batch_size * sizeof(timer::timer_tick_t)); /* lock the memory for the samples to prevent page faults if permissions are enough */
             VirtualLock(ref_samples.data(), batch_size * sizeof(timer::timer_tick_t));
 
-            state.start_test.store(true, std::memory_order_release); 
+        #if (x86_64)
+            std::vector<timer::timer_tick_t> npf_samples, add_samples;
+            using whv_create_partition_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE*);
+            using whv_set_partition_property_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY_CODE, const void*, UINT32);
+            using whv_setup_partition_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE);
+            using whv_create_virtual_processor_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, UINT32, UINT32);
+            using whv_map_gpa_range_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, void*, WHV_GUEST_PHYSICAL_ADDRESS, UINT64, WHV_MAP_GPA_RANGE_FLAGS);
+            using whv_set_virtual_processor_registers_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, UINT32, const WHV_REGISTER_NAME*, UINT32, const WHV_REGISTER_VALUE*);
+            using whv_run_virtual_processor_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, UINT32, void*, UINT32);
+            using whv_delete_partition_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE);
+            using nt_allocate_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
+            using nt_free_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, PSIZE_T, ULONG);
+
+            whv_create_partition_fn whv_create_partition = nullptr;
+            whv_set_partition_property_fn whv_set_partition_property = nullptr;
+            whv_setup_partition_fn whv_setup_partition = nullptr;
+            whv_create_virtual_processor_fn whv_create_virtual_processor = nullptr;
+            whv_map_gpa_range_fn whv_map_gpa_range = nullptr;
+            whv_set_virtual_processor_registers_fn whv_set_virtual_processor_registers = nullptr;
+            whv_run_virtual_processor_fn whv_run_virtual_processor = nullptr;
+            whv_delete_partition_fn whv_delete_partition = nullptr;
+            nt_allocate_virtual_memory_fn nt_allocate_virtual_memory = nullptr;
+            nt_free_virtual_memory_fn nt_free_virtual_memory = nullptr;
+
+            HMODULE winhv_dll = nullptr;
+            HMODULE ntdll_dll = nullptr;
+            WHV_PARTITION_HANDLE p{};
+            PVOID mem = nullptr;
+            const UINT32 reg_count = 12;
+            WHV_REGISTER_NAME names[reg_count]{};
+            WHV_REGISTER_VALUE values[reg_count]{};
+
+            bool npf_samples_locked = false;
+
+            if (check_nested_hypervisors) {
+                winhv_dll = LoadLibraryW(L"WinHvPlatform.dll");
+                ntdll_dll = memory::get_ntdll();
+
+                if (!winhv_dll || !ntdll_dll) {
+                    check_nested_hypervisors = false;
+                }
+                else {
+                    constexpr const char* whv_function_names[] = {
+                        "WHvCreatePartition",
+                        "WHvSetPartitionProperty",
+                        "WHvSetupPartition",
+                        "WHvCreateVirtualProcessor",
+                        "WHvMapGpaRange",
+                        "WHvSetVirtualProcessorRegisters",
+                        "WHvRunVirtualProcessor",
+                        "WHvDeletePartition"
+                    };
+                    void* whv_functions[ARRAYSIZE(whv_function_names)] = {};
+                    memory::get_function_address(winhv_dll, whv_function_names, whv_functions, ARRAYSIZE(whv_function_names));
+
+                    constexpr const char* nt_function_names[] = {
+                        "NtAllocateVirtualMemory",
+                        "NtFreeVirtualMemory"
+                    };
+                    void* nt_functions[ARRAYSIZE(nt_function_names)] = {};
+                    memory::get_function_address(ntdll_dll, nt_function_names, nt_functions, ARRAYSIZE(nt_function_names));
+
+                    whv_create_partition = reinterpret_cast<whv_create_partition_fn>(whv_functions[0]);
+                    whv_set_partition_property = reinterpret_cast<whv_set_partition_property_fn>(whv_functions[1]);
+                    whv_setup_partition = reinterpret_cast<whv_setup_partition_fn>(whv_functions[2]);
+                    whv_create_virtual_processor = reinterpret_cast<whv_create_virtual_processor_fn>(whv_functions[3]);
+                    whv_map_gpa_range = reinterpret_cast<whv_map_gpa_range_fn>(whv_functions[4]);
+                    whv_set_virtual_processor_registers = reinterpret_cast<whv_set_virtual_processor_registers_fn>(whv_functions[5]);
+                    whv_run_virtual_processor = reinterpret_cast<whv_run_virtual_processor_fn>(whv_functions[6]);
+                    whv_delete_partition = reinterpret_cast<whv_delete_partition_fn>(whv_functions[7]);
+
+                    nt_allocate_virtual_memory = reinterpret_cast<nt_allocate_virtual_memory_fn>(nt_functions[0]);
+                    nt_free_virtual_memory = reinterpret_cast<nt_free_virtual_memory_fn>(nt_functions[1]);
+
+                    if (!whv_create_partition || !whv_set_partition_property || !whv_setup_partition ||
+                        !whv_create_virtual_processor || !whv_map_gpa_range || !whv_set_virtual_processor_registers ||
+                        !whv_run_virtual_processor || !whv_delete_partition || !nt_allocate_virtual_memory || !nt_free_virtual_memory) {
+                        FreeLibrary(winhv_dll);
+                        winhv_dll = nullptr;
+                        check_nested_hypervisors = false;
+                    }
+                }
+            }
+
+            if (check_nested_hypervisors) {
+                npf_samples.resize(batch_size);
+                add_samples.resize(batch_size);
+
+                const bool lock1 = VirtualLock(npf_samples.data(), batch_size * sizeof(timer::timer_tick_t));
+                const bool lock2 = VirtualLock(add_samples.data(), batch_size * sizeof(timer::timer_tick_t));
+                npf_samples_locked = lock1 && lock2;
+
+                if (FAILED(whv_create_partition(&p))) {
+                    check_nested_hypervisors = false;
+                }
+                else {
+                    UINT32 cpu_count = 1;
+                    whv_set_partition_property(p, WHvPartitionPropertyCodeProcessorCount, &cpu_count, sizeof(cpu_count));
+                    if (FAILED(whv_setup_partition(p))) {
+                        whv_delete_partition(p);
+                        p = nullptr;
+                        check_nested_hypervisors = false;
+                    }
+                    else if (FAILED(whv_create_virtual_processor(p, 0, 0))) {
+                        whv_delete_partition(p);
+                        p = nullptr;
+                        check_nested_hypervisors = false;
+                    }
+                    else {
+                        SIZE_T region_size = 0x2000;
+                        const NTSTATUS status = nt_allocate_virtual_memory(current_process, &mem, 0, &region_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                        if (!NT_SUCCESS(status)) {
+                            whv_delete_partition(p);
+                            p = nullptr;
+                            check_nested_hypervisors = false;
+                        }
+                        else if (FAILED(whv_map_gpa_range(p, mem, 0, 0x2000, static_cast<WHV_MAP_GPA_RANGE_FLAGS>(7)))) {
+                            SIZE_T free_size = 0;
+                            nt_free_virtual_memory(current_process, &mem, &free_size, MEM_RELEASE);
+                            mem = nullptr;
+                            whv_delete_partition(p);
+                            p = nullptr;
+                            check_nested_hypervisors = false;
+                        }
+                        else {
+                            /* It uses a 16-bit address offset of 0x3000 (little-endian 00 30). Since VMAware's dsSeg.Base is 0, the physical address (GPA) it attempts to access is DS.Base + 0x3000 = 0x3000 */
+                            u8 code[] = { 0xA0, 0x00, 0x30 }; /* Because the CS descriptor specifies a 16-bit default size, the processor decodes 0xA0 as MOV AL, [0x3000] */
+                            memcpy((u8*)mem + 0x1000, code, sizeof(code));
+
+                            WHV_X64_SEGMENT_REGISTER cs_seg = { 0 };
+                            cs_seg.Base = 0;
+                            cs_seg.Limit = 0xFFFF;
+                            cs_seg.Selector = 0;
+                            cs_seg.Attributes = 0x9B;
+                           /* 
+                            * 0x9B here translates to SegmentType = 0xB (Execute/Read, accessed code segment)
+                            * NonSystemSegment = 1, DescriptorPrivilegeLevel = 0 (DPL matches real mode CPL of 0), and Present = 1,
+                            * the Default (D) bit (bit 14 of the attributes union) is left at 0 telling the hardware that this is a 16-bit segment
+                            */
+
+                            WHV_X64_SEGMENT_REGISTER ds_seg = { 0 };
+                            ds_seg.Base = 0;
+                            ds_seg.Limit = 0xFFFF;
+                            ds_seg.Selector = 0;
+                            ds_seg.Attributes = 0x93; /* This translates to SegmentType = 0x3 (Read/Write, accessed data segment), which is the standard configuration for real-mode data segments */
+
+                            names[0] = WHvX64RegisterCr0;
+                            names[1] = WHvX64RegisterCr3;
+                            names[2] = WHvX64RegisterCr4;
+                            names[3] = WHvX64RegisterEfer;
+                            names[4] = WHvX64RegisterRip;
+                            names[5] = WHvX64RegisterRflags;
+                            names[6] = WHvX64RegisterCs;
+                            names[7] = WHvX64RegisterDs;
+                            names[8] = WHvX64RegisterEs;
+                            names[9] = WHvX64RegisterSs;
+                            names[10] = WHvX64RegisterFs;
+                            names[11] = WHvX64RegisterGs;
+
+                            memset(values, 0, sizeof(values));
+                            /* 
+                             * In CR0, Bit 0 (PE - Protection Enable) is set to 0 and Bit 31 (PG - Paging) too, this makes VMAware's guest VP L2 run in real-address mode 
+                             * The other set bits (CD, NW, and ET) match the standard architectural power-on reset state of x86 processors
+                             */
+                            values[0].Reg64 = 0x60000010;
+                            values[1].Reg64 = 0x0;
+                            values[2].Reg64 = 0x0;
+                            values[3].Reg64 = 0x0;
+                            values[4].Reg64 = 0x1000;
+                            values[5].Reg64 = 0x2;
+                            values[6].Segment = cs_seg;
+                            values[7].Segment = ds_seg;
+                            values[8].Segment = ds_seg;
+                            values[9].Segment = ds_seg;
+                            values[10].Segment = ds_seg;
+                            values[11].Segment = ds_seg;
+                            /* Since paging is disabled, #PF exceptions are architecturally impossible to be triggered by VMAware, forcing always an unconditional NPF */
+                        }
+                    }
+                }
+            }
+        #endif  
+            state.start_test.store(true, std::memory_order_release);
 
             /* Independent multi-trial state initialization */
             constexpr int trials = 3;
             const size_t local_max_attempts = batch_size * trials;
             timer::timer_tick_t best_cpuid_l = (std::numeric_limits<timer::timer_tick_t>::max)();
             timer::timer_tick_t best_ref_l = (std::numeric_limits<timer::timer_tick_t>::max)();
+        #if (x86_64)
+            timer::timer_tick_t best_npf_l = (std::numeric_limits<timer::timer_tick_t>::max)();
+            timer::timer_tick_t best_add_l = (std::numeric_limits<timer::timer_tick_t>::max)();
+        #endif
 
             /* Cache and cpu scheduler warm-up won't affect anything in the measurement loop, so ramp up frequency/P-states to a high non-AVX Turbo/P-state without vmexits */
             timer::warmup_cpu(serialize_available);
@@ -6008,7 +6230,7 @@ public:
                          */
                         sync = state.counter;
                         while (state.counter == sync); /* fastest busy-waiting strategy, PAUSE can conditionally exit, calling APIs like SwitchToThread() would be even worse */
-                        
+
                         r_pre = state.counter;
                         std::atomic_signal_fence(std::memory_order_acq_rel);
                         _serialize(); _serialize(); _serialize(); /* first serialize is slower because of having to deal with the pipeline, subsequent only pay the architectural cost of the serialization itself */
@@ -6022,7 +6244,7 @@ public:
 
                         v_pre = state.counter;
                         std::atomic_signal_fence(std::memory_order_seq_cst); /* _ReadWriteBarrier() aka dont emit runtime fences */
-                    #if (GCC || CLANG)
+                    #if (GCC || CLANG)  
                         size_t a = 0;
                         size_t b = 0, c = 0, d = 0;
                         __asm__ volatile (
@@ -6036,7 +6258,7 @@ public:
                         std::atomic_signal_fence(std::memory_order_seq_cst);
                         v_post = state.counter;
 
-                        /* We dont filter by cycles spent here (for example by querying thread cycle time) because the point of this function is to not use TSC or any other clock */
+                        /* We dont filter by cycles spent here (for example by querying thread cycle time) because the kernel would use TSC and the point of this function is to not use TSC or any other clock */
                         if (v_post > v_pre && r_post > r_pre) {
                             vm_samples[valid] = v_post - v_pre;
                             ref_samples[valid] = r_post - r_pre;
@@ -6056,7 +6278,7 @@ public:
                         timer::timer_tick_t r_pre, r_post, v_pre, v_post, sync;
 
                         sync = state.counter;
-                        while (state.counter == sync); 
+                        while (state.counter == sync);
                         sync = state.counter;
                         while (state.counter == sync);
 
@@ -6066,14 +6288,14 @@ public:
                         _mm_lfence(); _mm_lfence(); _mm_lfence(); _mm_lfence();
                         std::atomic_signal_fence(std::memory_order_acq_rel);
                         r_post = state.counter;
-                        
+
                         sync = state.counter;
-                        while (state.counter == sync); 
+                        while (state.counter == sync);
                         sync = state.counter;
-                        while (state.counter == sync); 
+                        while (state.counter == sync);
 
                         v_pre = state.counter;
-                        std::atomic_signal_fence(std::memory_order_seq_cst); 
+                        std::atomic_signal_fence(std::memory_order_seq_cst);
                     #if (GCC || CLANG)
                         size_t a = 0;
                         size_t b = 0, c = 0, d = 0;
@@ -6101,30 +6323,111 @@ public:
                     }
                 }
 
-                if (valid == 0) {
-                    continue;
+                /* If Hyper-V is enabled, check if there's another hypervisor sitting on top of Hyper-V with an unconditional vmexit */
+            #if (x86_64)
+                if (check_nested_hypervisors) {
+                    size_t npf_valid = 0;
+                    size_t npf_invalid = 0;
+
+                    while (npf_valid < batch_size && npf_invalid < local_max_attempts) {
+                        timer::timer_tick_t r_pre, r_post, v_pre, v_post, sync;
+
+                        sync = state.counter;
+                        while (state.counter == sync);
+                        sync = state.counter;
+                        while (state.counter == sync);
+
+                        r_pre = state.counter;
+                        std::atomic_signal_fence(std::memory_order_acq_rel);
+                        {
+                            volatile u32 init_a = 1;
+                            volatile u32 init_b = 2;
+                            u32 a = init_a;
+                            u32 b = init_b;
+                            for (u32 i = 0; i < 1500; i++) { /* add is the most stable instruction across all CPU architectures and models, normally 1-cycle latency */
+                                a += b; b += a; a += b; b += a; a += b; /* fibonacci dependency so ratio stays constant */
+                                b += a; a += b; b += a; a += b; b += a;
+                            }
+                            seed += (static_cast<unsigned long long>(a) + b);
+                        }
+                        std::atomic_signal_fence(std::memory_order_acq_rel);
+                        r_post = state.counter;
+
+                        values[4].Reg64 = 0x1000;
+                        whv_set_virtual_processor_registers(p, 0, names, reg_count, values);
+                        WHV_RUN_VP_EXIT_CONTEXT exit_ctx{};
+
+                        sync = state.counter;
+                        while (state.counter == sync);
+                        sync = state.counter;
+                        while (state.counter == sync);
+
+                        v_pre = state.counter;
+                        std::atomic_signal_fence(std::memory_order_seq_cst);
+                        /* 
+                         * Since GPA 0x3000 is outside our mapped range (0 to 0x2000), CPU triggers an EPT/NPT violation (GPA fault) because it belongs to the second-level address translation 
+                         * Nested page faults ALWAYS require L0 involvement to be handled, and VMAware can force L0 to synthethize a nested VMEXIT so it forwards the event to L1 
+                         * This type of VMEXIT is the only VMEXIT that can be reached from L2 CPL3 in both AMD and Intel
+                         * WHP is just used to make the vCPU in 16-bit real mode and disable first-level address translation faults, and to not make EPT violations to be translated as a #VE
+                         */
+                        whv_run_virtual_processor(p, 0, &exit_ctx, sizeof(exit_ctx));
+                        std::atomic_signal_fence(std::memory_order_seq_cst);
+                        v_post = state.counter;
+
+                        if (v_post > v_pre && r_post > r_pre && exit_ctx.ExitReason == WHvRunVpExitReasonMemoryAccess) {
+                            npf_samples[npf_valid] = v_post - v_pre;
+                            add_samples[npf_valid] = r_post - r_pre;
+                            npf_valid++;
+                        }
+                        else {
+                            npf_invalid++;
+                        }
+                    }
+
+                    if (npf_valid > 0) {
+                        /* Discard the unused default-initialized zero-elements */
+                        std::vector<timer::timer_tick_t> active_npf_samples(npf_samples.begin(), npf_samples.begin() + npf_valid);
+                        std::vector<timer::timer_tick_t> active_add_samples(add_samples.begin(), add_samples.begin() + npf_valid);
+
+                        /* Check for lowest dense cluster with no interrupt spikes, filter noise we can't directly detect (SMIs, NMIs, etc) */
+                        const timer::timer_tick_t npf_l = timer::calculate_latency(active_npf_samples);
+                        const timer::timer_tick_t add_l = timer::calculate_latency(active_add_samples);
+
+                        /* Record the cleanest/lowest latency observed across the independent trials */
+                        if (npf_l < best_npf_l) best_npf_l = npf_l;
+                        if (add_l < best_add_l) best_add_l = add_l;
+                    }
                 }
+            #endif
+                if (valid > 0) {
+                    /* Same as above */
+                    std::vector<timer::timer_tick_t> active_vm_samples(vm_samples.begin(), vm_samples.begin() + valid);
+                    std::vector<timer::timer_tick_t> active_ref_samples(ref_samples.begin(), ref_samples.begin() + valid);
 
-                /* Discard the unused default-initialized zero-elements */
-                std::vector<timer::timer_tick_t> active_vm_samples(vm_samples.begin(), vm_samples.begin() + valid);
-                std::vector<timer::timer_tick_t> active_ref_samples(ref_samples.begin(), ref_samples.begin() + valid);
+                    const timer::timer_tick_t cpuid_l = timer::calculate_latency(active_vm_samples);
+                    const timer::timer_tick_t ref_l = timer::calculate_latency(active_ref_samples);
 
-                /* Check for lowest dense cluster with no interrupt spikes, filter noise we can't detect (SMIs, NMIs, etc) */
-                const timer::timer_tick_t cpuid_l = timer::calculate_latency(active_vm_samples);
-                const timer::timer_tick_t ref_l = timer::calculate_latency(active_ref_samples);
-
-                /* Record the cleanest/lowest latency observed across the independent trials */
-                if (cpuid_l < best_cpuid_l) best_cpuid_l = cpuid_l;
-                if (ref_l < best_ref_l) best_ref_l = ref_l;
+                    if (cpuid_l < best_cpuid_l) best_cpuid_l = cpuid_l;
+                    if (ref_l < best_ref_l) best_ref_l = ref_l;
+                }
             }
 
             state.test_done.store(true, std::memory_order_release);
 
+            /* VMM = Time spent in hypervisor and baremetal; nVMM = Time spent in baremetal */
             const double latency_ratio = best_ref_l ? (double)best_cpuid_l / (double)best_ref_l : 0;
+            debug("TIMER: Instruction >> VMM -> ", best_cpuid_l, " | nVMM -> ", best_ref_l, " | Ratio -> ", latency_ratio);
 
-            /* VMM = Time spent in hypervisor; nVMM = Time spent in baremetal */
-            debug("TIMER: VMM -> ", best_cpuid_l, " | nVMM -> ", best_ref_l, " | Ratio -> ", latency_ratio); /* these ARE NOT cycles */
-            if (latency_ratio >= threshold) hypervisor_detected = true;
+        #if (x86_64)
+            const double npf_ratio = best_add_l ? (double)best_npf_l / (double)best_add_l : 0;
+            debug("TIMER: Memory >> VMM -> ", best_npf_l, " | nVMM -> ", best_add_l, " | Ratio -> ", npf_ratio);
+        #else
+            const double npf_ratio = 0.0;
+        #endif
+
+            if (latency_ratio >= threshold || (check_nested_hypervisors && npf_ratio >= 4.0)) {
+                hypervisor_detected = true;
+            }
 
             /*
              * Detect IPI-based counter pausing bypasses
@@ -6134,6 +6437,23 @@ public:
             if (best_cpuid_l > 2500 || best_ref_l > 2500) {
                 hypervisor_detected = true;
             }
+
+        #if (x86_64)
+            if (mem) {
+                SIZE_T free_size = 0;
+                nt_free_virtual_memory(current_process, &mem, &free_size, MEM_RELEASE);
+            }
+            if (p) {
+                whv_delete_partition(p);
+            }
+            if (npf_samples_locked) {
+                VirtualUnlock(npf_samples.data(), batch_size * sizeof(timer::timer_tick_t));
+                VirtualUnlock(add_samples.data(), batch_size * sizeof(timer::timer_tick_t));
+            }
+            if (winhv_dll) {
+                FreeLibrary(winhv_dll);
+            }
+        #endif
 
             SetThreadPriorityBoost(current_thread, FALSE);
             SetThreadPriority(current_thread, old_thread_priority);
@@ -6523,17 +6843,16 @@ public:
             return false;
         }
 
-        constexpr u32 encrypted_memory_capability = 0x8000001f;
         constexpr u32 msr_index = 0xc0010131;
 
-        if (!cpu::is_leaf_supported(encrypted_memory_capability)) {
+        if (!cpu::is_leaf_supported(cpu::leaf::encrypted_mem)) {
             return false;
         }
 
         u32 eax = 0;
         u32 unused = 0;
 
-        cpu::cpuid(eax, unused, unused, unused, encrypted_memory_capability);
+        cpu::cpuid(eax, unused, unused, unused, cpu::leaf::encrypted_mem);
 
         if (!(eax & (1 << 1))) {
             return false;
@@ -8957,21 +9276,21 @@ public:
      */
     [[nodiscard]] static bool dll() {
         static constexpr struct {
-            const char* dll_name;
+            const wchar_t* dll_name;
             enum brand_enum brand;
         } dlls[] = {
-            {"sbiedll.dll",   brand_enum::SANDBOXIE},
-            {"pstorec.dll",   brand_enum::CWSANDBOX},
-            {"vmcheck.dll",   brand_enum::VPC},
-            {"cmdvrt32.dll",  brand_enum::COMODO},
-            {"cmdvrt64.dll",  brand_enum::COMODO},
-            {"cuckoomon.dll", brand_enum::CUCKOO},
-            {"SxIn.dll",      brand_enum::QIHOO},
-            {"wpespy.dll",    brand_enum::NULL_BRAND}
+            {L"sbiedll.dll",   brand_enum::SANDBOXIE},
+            {L"pstorec.dll",   brand_enum::CWSANDBOX},
+            {L"vmcheck.dll",   brand_enum::VPC},
+            {L"cmdvrt32.dll",  brand_enum::COMODO},
+            {L"cmdvrt64.dll",  brand_enum::COMODO},
+            {L"cuckoomon.dll", brand_enum::CUCKOO},
+            {L"SxIn.dll",      brand_enum::QIHOO},
+            {L"wpespy.dll",    brand_enum::NULL_BRAND}
         };
 
         for (const auto& x : dlls) {
-            if (GetModuleHandleA(x.dll_name) != nullptr) {
+            if (GetModuleHandleW(x.dll_name) != nullptr) {
                 debug("DLL: Found ", x.dll_name, " (", brands::brand_enum_to_string(x.brand), ")");
                 return core::add(x.brand);
             }
@@ -8982,28 +9301,42 @@ public:
 
              
     /**
-     * @brief Check if the function "wine_get_unix_file_name" is present and if the OS booted from a VHD container
+     * @brief Check for Wine Is Not An Emulator artifacts
      * @category Windows
-     * @implements VM::WINE_FUNC
+     * @implements VM::WINE
      */
     [[nodiscard]] static bool wine() {
         #if (_WIN32_WINNT < _WIN32_WINNT_WIN8)
             return false;
         #else
             __try {
-                BOOL isNativeVhdBoot = 0;
+                BOOL is_native_vhd_boot = 0;
                 /*
                  * We dont call NtQuerySystemInformation with SystemPrefetchPathInformation | SystemHandleInformation
-                 * the point is to check if this kernel32.dll function throws an exception
+                 * the point is to check if this kernel32.dll function throws an exception. This should actually make
+                 * VMAware unable to run on Wine since there's a missing import
                  */
-                IsNativeVhdBoot(&isNativeVhdBoot);
-                VMAWARE_UNUSED(isNativeVhdBoot);
+                IsNativeVhdBoot(&is_native_vhd_boot);
+                VMAWARE_UNUSED(is_native_vhd_boot);
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
                 debug("WINE: SEH invoked");
                 return true;
             }
         #endif
+
+        const HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+        if (!k32) {
+           return false;
+        }
+
+        constexpr const char* function_names[] = { "wine_get_unix_file_name" };
+        void* functions[ARRAYSIZE(function_names)] = {};
+        memory::get_function_address(k32, function_names, functions, ARRAYSIZE(function_names));
+
+        if (functions[0] != nullptr) {
+            return core::add(brand_enum::WINE);
+        }
 
         return false;
     }
@@ -9697,7 +10030,7 @@ public:
 
 
     /**
-     * @brief Check for GPU capabilities related to VMs
+     * @brief Check for virtual GPU capabilities
      * @category Windows
      * @implements VM::GPU_CAPABILITIES
      */
@@ -9844,14 +10177,14 @@ public:
     [[nodiscard]] static bool virtual_processors() {
     #if (x86)
         int regs[4];
-        __cpuid(regs, 0x40000000);
+        __cpuid(regs, cpu::leaf::hypervisor);
 
         const u32 max_leaf = static_cast<u32>(regs[0]);
-        if (max_leaf < 0x40000005) {
+        if (max_leaf < cpu::leaf::hv_processors) {
             return false;
         }
 
-        __cpuid(regs, 0x40000005);
+        __cpuid(regs, cpu::leaf::hv_processors);
         const u32 max_virtual_processors = static_cast<u32>(regs[0]);
         const u32 max_logical_processors = static_cast<u32>(regs[1]);
 
@@ -10414,6 +10747,9 @@ public:
         if (util::hyper_x() == HYPERV_HOST) {
             return false;
         }
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
 
         struct exception_handler {
             static int evaluate(unsigned int code, struct _EXCEPTION_POINTERS* ep, volatile ULONG_PTR* out_trap_ip) {
@@ -10846,7 +11182,6 @@ public:
          * -------------------------------------------------------------------------
          * helper lambdas
          * -------------------------------------------------------------------------
-         *
          */
         auto buffer_contains_ascii_ci = [](const BYTE* data, size_t len, const char* pat) noexcept -> bool {
             if (!data || len == 0 || !pat) return false;
@@ -10944,7 +11279,6 @@ public:
          * -------------------------------------------------------------------------
          * main logic block
          * -------------------------------------------------------------------------
-         *
          */
         do {
             if (!OpenProcessToken(current_process_handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token_handle)) break;
@@ -11106,7 +11440,7 @@ public:
                         found_redhat = true;
             }
             if (found_redhat) {
-                debug("NVRAM: QEMU/OVMF detected");
+                debug("NVRAM: QEMU/OVMF certificates detected");
                 detection_result = core::add(brand_enum::QEMU);
                 break;
             }
@@ -11136,14 +11470,13 @@ public:
     [[nodiscard]] static bool cpu_heuristic() {
         bool spoofed = false;
     #if (x86)
-        if (util::is_running_under_translator()) {
-            debug("CPU_HEURISTIC: Running inside a binary translation layer");
+        if (util::is_x86_process_on_arm()) {
             return false;
         }
 
         /* 1) Check for commonly disabled instructions on patches and VMs */
         u32 a = 0, b = 0, c = 0, d = 0;
-        cpu::cpuid(a, b, c, d, 1u);
+        cpu::cpuid(a, b, c, d, cpu::leaf::features);
 
         constexpr u32 AES_NI_BIT = 1u << 25;
         const bool aes_support = (c & AES_NI_BIT) != 0;
@@ -11217,9 +11550,9 @@ public:
         const bool osxsave_adv = (c & CPUID1_OSXSAVE) != 0;
 
         u32 a7 = 0, b7 = 0, c7 = 0, d7 = 0;
-        cpu::cpuid(a, b, c, d, 0u, 0u);
+        cpu::cpuid(a, b, c, d, cpu::leaf::basic_info, 0u);
         if (a >= 7u) {
-            cpu::cpuid(a7, b7, c7, d7, 7u, 0u);
+            cpu::cpuid(a7, b7, c7, d7, cpu::leaf::ext_features, 0u);
         }
 
         const bool avx2_adv = (b7 & CPUID7_AVX2) != 0;
@@ -11735,7 +12068,7 @@ public:
 
 
     /**
-     * @brief Check the presence of system timers
+     * @brief Check for the absence of system timers
      * @category x86, Windows
      * @implements VM::CLOCK
      */
@@ -11743,8 +12076,7 @@ public:
     #if (ARM)
 		return false; /* ARM systems do not have the classic x86 timers */
     #else   
-		if (util::is_running_under_translator()) {
-            debug("CLOCK: Running inside an ARM CPU");
+		if (util::is_x86_process_on_arm()) {
             return false;
         }
 
@@ -11868,7 +12200,7 @@ public:
 
 
     /**
-     * @brief Check whether the hypervisor correctly handles MSR behavior
+     * @brief Check whether the hypervisor mishandles MSR behavior
      * @category Windows, x86
      * @implements VM::MSR
      */
@@ -11984,7 +12316,9 @@ public:
     #if (!x86)
         return false;
     #else
-        if (util::is_running_under_translator()) return false;
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
         const HMODULE ntdll = memory::get_ntdll();
         if (!ntdll) return false;
 
@@ -12334,6 +12668,10 @@ public:
         };
     #pragma pack(pop)
 
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         static_assert(sizeof(iretq_frame) == 16, "iretq_frame size must be exactly 16 bytes for proper hardware exception processing.");
         static_assert(std::is_standard_layout<iretq_frame>::value, "iretq_frame must follow standard layout rules.");
 
@@ -12487,7 +12825,7 @@ public:
         }
 
         u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
-        cpu::cpuid(eax, ebx, ecx, edx, 0x80000001);
+        cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::proc_ext);
         const bool svmcpuid_visible = ((ecx >> 2) & 1) != 0;
 
         const DWORD exception_status = memory::execute_handler(vmload_stub);
@@ -12506,16 +12844,6 @@ public:
     #else
         return false;
     #endif  
-    }
-
-
-    /**
-     * @brief Check whether a hypervisor is nested within a Hyper-V partition
-     * @category Windows, x86
-     * @implements VM::HYPERV_NESTED
-     */
-    [[nodiscard]] static bool hyperv_nested() {
-        return util::hyper_x() == HYPERV_NESTED_VM;
     }
 
 
@@ -12695,9 +13023,9 @@ public:
                         const u64 base_addr = read_u64(payload);
                         const u64 blob_len = read_u64(payload + 8);
 
+                        /* OVMF's memory bounds of the SEC and PEI execution phases */
                         if ((base_addr == 0x830000 && blob_len == 0xD0000) ||
                             (base_addr == 0x900000 && blob_len == 0xE80000)) {
-                            debug("MEASURED_BOOT: Detected OVMF's memory bounds of the SEC and PEI execution phases");
                             return true;
                         }
                     }
@@ -14010,7 +14338,6 @@ public:
             case EIP_OVERFLOW: return "EIP_OVERFLOW";
             case SVM_EXCEPTIONS: return "SVM_EXCEPTIONS";
             case CGROUP: return "CGROUP";
-            case HYPERV_NESTED: return "HYPERV_NESTED";
             case MEASURED_BOOT: return "MEASURED_BOOT";
             case TPM_PASSTHROUGH: return "TPM_PASSTHROUGH";
             /* END OF TECHNIQUE LIST */
@@ -14473,7 +14800,6 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::SINGLE_STEP, {100, VM::single_step}},
             {VM::TPM_PASSTHROUGH, {100, VM::tpm_passthrough}},
             {VM::NVRAM, {100, VM::nvram}},
-            {VM::HYPERV_NESTED, {100, VM::hyperv_nested}},
             {VM::CPU_HEURISTIC, {90, VM::cpu_heuristic}},
             {VM::ACPI_SIGNATURE, {100, VM::acpi_signature}},
             {VM::CLOCK, {45, VM::clock}},
