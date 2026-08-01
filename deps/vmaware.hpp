@@ -601,7 +601,6 @@ public:
         DRIVERS,
         HANDLES,
         VIRTUAL_PROCESSORS,
-        HYPERVISOR_QUERY,
         AUDIO,
         DISPLAY,
         DLL,
@@ -3364,7 +3363,7 @@ public:
             /*
              *  Golden Rules (must happen ALWAYS; if they don't happen the check should be aborted):
              *  1. The check needs AT LEAST two different physical cores, so if one single core is detected, returns
-             *  2. The counter thread should always be in the middle available logical CPU when there's more than 2 cores, and in the core 2 (1-indexed) when there's 2 cores
+             *  2. The counter thread should always be in the middle available physical CPU when there's more than 2 cores, and in the core 2 (1-indexed) when there's 2 cores
              *
              *  Silver Rules (in order of priority):
              *  1. SMT Sibling Isolation: Disqualify any logical core sharing the same physical core as the counter thread to prevent execution port and pipeline contention.
@@ -3373,7 +3372,7 @@ public:
              *  4. Deduct points (-800) for candidate cores that share an L2 cache with the counter thread but reside on different physical cores (targeting and resolving Intel E-core cluster L2 controller bottlenecks).
              *  5. Prioritize cores with matching efficiency classes (+100) to align power and frequency (DVFS) domains.
              *  6. Apply a minor index-distance penalty to select the closest physical neighbor on the silicon layout/ring bus stop.
-             *  7. Penalize edge logical cores (-50) to avoid OS interrupt and background DPC scheduler noise.
+             *  7. Penalize edge logical cores (-50) because those are where most OS interrupt and background DPC scheduler noise occur.
             */
             [[nodiscard]] static DWORD_PTR get_mask(const bool measurement) {
                 const HANDLE current_process = reinterpret_cast<HANDLE>(-1LL);
@@ -3518,12 +3517,38 @@ public:
                 }
 
                 /* counter: middle available logical CPU when >2, otherwise second available logical CPU */
-                const DWORD counter_pos0 = (n == 2) ? 1u : (n / 2u);
-                if (counter_pos0 >= n) {
+                DWORD unique_cores[64]{};
+                DWORD unique_cores_count = 0;
+                DWORD core_to_logical[64]{};
+
+                for (DWORD i = 0; i < n; ++i) {
+                    const DWORD log = idxs[i];
+                    const DWORD core = logical_to_core[log];
+
+                    bool already_seen = false;
+                    for (DWORD c = 0; c < unique_cores_count; ++c) {
+                        if (unique_cores[c] == core) {
+                            already_seen = true;
+                            break;
+                        }
+                    }
+                    if (!already_seen) {
+                        unique_cores[unique_cores_count] = core;
+                        core_to_logical[unique_cores_count] = log;
+                        unique_cores_count++;
+                    }
+                }
+
+                if (unique_cores_count < 2) {
                     return 0ull;
                 }
 
-                const DWORD counter_logical = idxs[counter_pos0];
+                const DWORD counter_pos0 = (unique_cores_count == 2) ? 1u : (unique_cores_count / 2u);
+                if (counter_pos0 >= unique_cores_count) {
+                    return 0ull;
+                }
+
+                const DWORD counter_logical = core_to_logical[counter_pos0];
                 const DWORD counter_core = logical_to_core[counter_logical];
                 const DWORD counter_numa = logical_to_numa[counter_logical];
                 const BYTE counter_efficiency = logical_to_efficiency[counter_logical];
@@ -4381,70 +4406,79 @@ public:
 
 
         [[nodiscard]] static bool is_x86_process_on_arm() {
-        #if (WINDOWS)
-            const char* brand = cpu::get_brand();
-            if (brand && strstr(brand, "Virtual CPU")) {
-                return true;
-            }
-        #endif
-
-        #if (WINDOWS && _WIN32_WINNT >= _WIN32_WINNT_WIN10)
-            const HANDLE current_process = reinterpret_cast<HANDLE>(-1LL);
-            USHORT proc_machine = 0, native_machine = 0;
-
-            const auto is_wow64_process_2 = &IsWow64Process2;
-            if (is_wow64_process_2(current_process, &proc_machine, &native_machine)) {
-                const bool translated =
-                    (native_machine == IMAGE_FILE_MACHINE_ARM64 && (proc_machine == IMAGE_FILE_MACHINE_AMD64 || proc_machine == IMAGE_FILE_MACHINE_I386)) 
-                    ||
-                    (native_machine == IMAGE_FILE_MACHINE_ARMNT && proc_machine == IMAGE_FILE_MACHINE_I386);
-
-                if (translated) {
+            static const bool cached = []() -> bool {
+            #if (WINDOWS)
+                const char* brand = cpu::get_brand();
+                if (brand && strstr(brand, "Virtual CPU")) {
                     return true;
                 }
-            }
+            #endif
 
-            /* Fallback */
-            if (native_machine == IMAGE_FILE_MACHINE_ARM64 || native_machine == IMAGE_FILE_MACHINE_ARMNT) {
-                using get_process_information_fn = BOOL(__stdcall*)(HANDLE, PROCESS_INFORMATION_CLASS, PVOID, DWORD);
-                const HMODULE ntdll = memory::get_ntdll();
-                if (ntdll == nullptr) {
-                    return false;
+            #if (WINDOWS && _WIN32_WINNT >= _WIN32_WINNT_WIN10)
+                const HANDLE current_process = reinterpret_cast<HANDLE>(-1);
+
+                USHORT proc_machine = 0;
+                USHORT native_machine = 0;
+
+                if (IsWow64Process2(current_process, &proc_machine, &native_machine)) {
+                    if ((native_machine == IMAGE_FILE_MACHINE_ARM64 &&
+                        (proc_machine == IMAGE_FILE_MACHINE_AMD64 ||
+                            proc_machine == IMAGE_FILE_MACHINE_I386)) ||
+                        (native_machine == IMAGE_FILE_MACHINE_ARMNT &&
+                            proc_machine == IMAGE_FILE_MACHINE_I386)) {
+                        return true;
+                    }
                 }
 
-                constexpr const char* function_names[] = { "GetProcessInformation" };
-                void* functions[ARRAYSIZE(function_names)] = {};
-                memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+                if (native_machine == IMAGE_FILE_MACHINE_ARM64 ||
+                    native_machine == IMAGE_FILE_MACHINE_ARMNT) {
 
-                auto get_proc_info = reinterpret_cast<get_process_information_fn>(functions[0]);
-                if (get_proc_info) {
-                    struct PROCESS_MACHINE_INFORMATION {
-                        USHORT ProcessMachine;
-                        USHORT Res0;
-                        DWORD  MachineAttributes;
-                    } pmInfo = {};
+                    using get_process_information_fn =
+                        BOOL(__stdcall*)(HANDLE, PROCESS_INFORMATION_CLASS, PVOID, DWORD);
 
-                    constexpr auto process_machine_type_info = static_cast<PROCESS_INFORMATION_CLASS>(9);
-                    if (get_proc_info(current_process, process_machine_type_info, &pmInfo, sizeof(pmInfo))) {
-                        if (pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_I386 || (native_machine == IMAGE_FILE_MACHINE_ARM64 && pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_AMD64)) {
-                            return true;
+                    if (HMODULE ntdll = memory::get_ntdll()) {
+                        constexpr const char* names[] = { "GetProcessInformation" };
+                        void* funcs[1] = {};
+                        memory::get_function_address(ntdll, names, funcs, 1);
+
+                        if (auto get_proc_info =
+                            reinterpret_cast<get_process_information_fn>(funcs[0])) {
+
+                            struct PROCESS_MACHINE_INFORMATION {
+                                USHORT ProcessMachine;
+                                USHORT Res0;
+                                DWORD MachineAttributes;
+                            } pmInfo{};
+
+                            constexpr auto process_machine_type_info =
+                                static_cast<PROCESS_INFORMATION_CLASS>(9);
+
+                            if (get_proc_info(current_process,
+                                process_machine_type_info,
+                                &pmInfo,
+                                sizeof(pmInfo))) {
+                                if (pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_I386 ||
+                                    (native_machine == IMAGE_FILE_MACHINE_ARM64 &&
+                                        pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_AMD64)) {
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }
-            }
-        #endif
+            #endif
 
-            if (cpu::is_leaf_supported(cpu::leaf::hypervisor)) {
-                const std::string vendor = cpu::cpu_manufacturer(cpu::leaf::hypervisor);
+                if (cpu::is_leaf_supported(cpu::leaf::hypervisor)) {
+                    const std::string vendor = cpu::cpu_manufacturer(cpu::leaf::hypervisor);
 
-                if (vendor == "VirtualApple" ||   /* Apple Rosetta */
-                    vendor == "PowerVM Lx86")     /* IBM PowerVM Lx86 */
-                {
-                    return true;
+                    return vendor == "VirtualApple" ||
+                        vendor == "PowerVM Lx86";
                 }
-            }
 
-            return false;
+                return false;
+            }();
+
+            return cached;
         }
 
 
@@ -5884,10 +5918,8 @@ public:
     #endif
     {
     #if (x86 && WINDOWS)
-        using timer = struct timer;
-
         if (util::is_x86_process_on_arm()) {
-            debug("BINARY_TRANSLATOR: Running inside a binary translation layer");
+            debug("TIMER: Running inside a binary translation layer");
             return false;
         }
 
@@ -5899,6 +5931,10 @@ public:
             threshold = 75.0;
             check_nested_hypervisors = true;
         }
+
+        #if (x86_32)
+            VMAWARE_UNUSED(check_nested_hypervisors);
+        #endif
 
         static timer::cache_state state;
         static_assert(alignof(timer::cache_state) >= 64, "timer::cache_state must be aligned to 64 bytes to prevent cache-line thrashing (false sharing).");
@@ -7520,6 +7556,10 @@ public:
      * 
      */
     [[nodiscard]] static bool system_registers() {
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         /*
          * Even though SMSW queries a status register (CR0), it is historically grouped with descriptor table checks in virtualization detection
          * (often called "Red Pill" techniques)
@@ -9571,6 +9611,10 @@ public:
      * @implements VM::VPC_INVALID
      */
     [[nodiscard]] static bool vpc_invalid() {
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         bool rc = false;
     #if (x86_32 && !CLANG)
 
@@ -9611,6 +9655,7 @@ public:
             rc = false;
         }
     #endif
+
         return rc;
     }
 
@@ -9622,6 +9667,10 @@ public:
      * @implements VM::VMWARE_STR
      */
     [[nodiscard]] static bool vmware_str() {
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
     #if (x86_32)
         u16 tr = 0;
         __asm {
@@ -10235,62 +10284,6 @@ public:
         return false;
     }
 
-
-    /**
-     * @brief Check if a call to NtQuerySystemInformation with the 0x9f leaf fills a _SYSTEM_HYPERVISOR_DETAIL_INFORMATION structure
-     * @category Windows, x86_64
-     * @implements VM::HYPERVISOR_QUERY
-     */
-    [[nodiscard]] static bool hypervisor_query() {
-    #if (x86_64)
-        if (util::hyper_x() == HYPERV_HOST) {
-            return false;
-        }
-
-        struct HV_DETAILS {
-            ULONG Data[4];
-        };
-        struct SYSTEM_HYPERVISOR_DETAIL_INFORMATION {
-            HV_DETAILS HvVendorAndMaxFunction;
-            HV_DETAILS HypervisorInterface;
-            HV_DETAILS HypervisorVersion;
-            HV_DETAILS HvFeatures;
-            HV_DETAILS HwFeatures;
-            HV_DETAILS EnlightenmentInfo;
-            HV_DETAILS ImplementationLimits;
-        };
-
-        using PHV_DETAILS = HV_DETAILS*;
-        using PSYSTEM_HYPERVISOR_DETAIL_INFORMATION = SYSTEM_HYPERVISOR_DETAIL_INFORMATION*;
-        using nt_query_system_information_fn = NTSTATUS(__stdcall*)(int SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength);
-
-        const HMODULE ntdll = memory::get_ntdll();
-        if (!ntdll) return false;        
-
-        constexpr const char* function_names[] = { "NtQuerySystemInformation" };
-        void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
-
-        const nt_query_system_information_fn nt_query_system_information = reinterpret_cast<nt_query_system_information_fn>(functions[0]);
-        if (nt_query_system_information) {
-            SYSTEM_HYPERVISOR_DETAIL_INFORMATION hypervisor_information{};
-
-            /* Request class 0x9F (SystemHypervisorDetailInformation), this asks the kernel to fill the structure with information about the hypervisor layer it is running on top of */
-            const NTSTATUS status = nt_query_system_information(0x9F, &hypervisor_information, sizeof(hypervisor_information), nullptr);
-
-            if (status != 0) {
-                return false;
-            }
-
-            /* If Data[0] is non-zero, it means the kernel has successfully communicated with a hypervisor */
-            if (hypervisor_information.HvVendorAndMaxFunction.Data[0] != 0) {
-                return true;
-            }
-        }
-    #endif
-        return false;
-    }
-
     
     /**
      * @brief Check for particular object directory which is present in Sandboxie virtual environment but not in usual host systems
@@ -10620,6 +10613,10 @@ public:
      * @implements VM::TRAP
      */
     [[nodiscard]] static bool trap() {
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         bool hypervisor_caught = false;
     #if (x86_64)
         /*
@@ -10863,6 +10860,10 @@ public:
     #if (!x86_64)
         return false;
     #else
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         constexpr u32 PW2 = 0xFEDCBA98U;
 
         struct vmcall_info {
@@ -12245,6 +12246,10 @@ public:
     #if (!x86)
         return false;
     #else
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         constexpr u32 random_msr = 0xDEADBEEFu;
 
         auto try_read = [](u32 msr_index) noexcept -> bool {
@@ -12310,6 +12315,10 @@ public:
     #if (!x86)
         return false;
     #else
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+
         const void* stubs[2] = { vmcall_stub, vmmcall_stub };
         bool is_kvm_detected = false;
         bool generic_hypervisor = false;
@@ -12661,6 +12670,9 @@ public:
         if (util::hyper_x() == HYPERV_HOST) {
             return false;
         }
+        if (util::is_x86_process_on_arm()) {
+            return false;
+        }
 
         bool is_vm = true;
         DWORD exc_code = 0;
@@ -12858,6 +12870,9 @@ public:
         }
 
         if (util::hyper_x() == HYPERV_HOST) {
+            return false;
+        }
+        if (util::is_x86_process_on_arm()) {
             return false;
         }
 
@@ -13162,18 +13177,18 @@ public:
             u32 count = 0;
             u32 capacity = 0;
 
-            void push(const tracked_event& ev) noexcept {
+            bool push(const tracked_event& ev) noexcept {
                 if (count == capacity) {
                     const u32 new_cap = capacity ? capacity * 2 : 16;
                     tracked_event* const new_items = static_cast<tracked_event*>(realloc(items, new_cap * sizeof(tracked_event)));
-                    if (new_items) {
-                        items = new_items;
-                        capacity = new_cap;
+                    if (!new_items) {
+                        return false;
                     }
+                    items = new_items;
+                    capacity = new_cap;
                 }
-                if (count < capacity) {
-                    items[count++] = ev;
-                }
+                items[count++] = ev;
+                return true;
             }
 
             void free_list() noexcept {
@@ -13229,12 +13244,51 @@ public:
         using TBS_HCONTEXT = void*;
         using TBS_RESULT = unsigned long;
 
+        using tbsi_context_create_t = TBS_RESULT(__stdcall*)(const void*, TBS_HCONTEXT*);
+        using tbsi_get_tcg_log_ex_t = TBS_RESULT(__stdcall*)(u32, u8*, u32*);
+        using tbsip_submit_command_t = TBS_RESULT(__stdcall*)(TBS_HCONTEXT, u32, u32, const u8*, u32, u8*, u32*);
         using tbsip_context_close_t = TBS_RESULT(__stdcall*)(TBS_HCONTEXT);
+
+        auto read_u16 = [](const u8* const ptr) noexcept -> u16 {
+            u16 val;
+            memcpy(&val, ptr, sizeof(val));
+            return val;
+        };
+
+        auto read_u32 = [](const u8* const ptr) noexcept -> u32 {
+            u32 val;
+            memcpy(&val, ptr, sizeof(val));
+            return val;
+        };
+
+        using bcrypt_open_algorithm_provider_t = NTSTATUS(__stdcall*)(BCRYPT_ALG_HANDLE*, LPCWSTR, LPCWSTR, ULONG);
+        using bcrypt_get_property_t = NTSTATUS(__stdcall*)(BCRYPT_HANDLE, LPCWSTR, PUCHAR, ULONG, ULONG*, ULONG);
+        using bcrypt_create_hash_t = NTSTATUS(__stdcall*)(BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE*, PUCHAR, ULONG, PUCHAR, ULONG, ULONG);
+        using bcrypt_hash_data_t = NTSTATUS(__stdcall*)(BCRYPT_HASH_HANDLE, PUCHAR, ULONG, ULONG);
+        using bcrypt_finish_hash_t = NTSTATUS(__stdcall*)(BCRYPT_HASH_HANDLE, PUCHAR, ULONG, ULONG);
+        using bcrypt_destroy_hash_t = NTSTATUS(__stdcall*)(BCRYPT_HASH_HANDLE);
+        using bcrypt_close_algorithm_provider_t = NTSTATUS(__stdcall*)(BCRYPT_ALG_HANDLE, ULONG);
+
+        bcrypt_open_algorithm_provider_t p_bcrypt_open_algorithm_provider = nullptr;
+        bcrypt_get_property_t p_bcrypt_get_property = nullptr;
+        bcrypt_create_hash_t p_bcrypt_create_hash = nullptr;
+        bcrypt_hash_data_t p_bcrypt_hash_data = nullptr;
+        bcrypt_finish_hash_t p_bcrypt_finish_hash = nullptr;
+        bcrypt_destroy_hash_t p_bcrypt_destroy_hash = nullptr;
+        bcrypt_close_algorithm_provider_t p_bcrypt_close_algorithm_provider = nullptr;
+
+        tbsi_context_create_t p_tbsi_context_create = nullptr;
+        tbsi_get_tcg_log_ex_t p_tbsi_get_tcg_log_ex = nullptr;
+        tbsip_submit_command_t p_tbsip_submit_command = nullptr;
+        tbsip_context_close_t p_tbsip_context_close = nullptr;
 
         HMODULE bcrypt_dll = nullptr;
         HMODULE tbs_dll = nullptr;
         TBS_HCONTEXT h_tbs_context = nullptr;
         u8* log_buffer = nullptr;
+        BCRYPT_ALG_HANDLE h_bcrypt_alg = nullptr;
+        u8* hash_object_buffer = nullptr;
+        DWORD cb_hash_object = 0;
         tracked_event_list pcr_events[24] = {};
         bool passthrough_detected = false;
 
@@ -13246,14 +13300,18 @@ public:
                 free(log_buffer);
                 log_buffer = nullptr;
             }
-            if (h_tbs_context && tbs_dll) {
-                const char* close_name[] = { "Tbsip_Context_Close" };
-                void* close_func[1] = { nullptr };
-                memory::get_function_address(tbs_dll, close_name, close_func, 1);
-                const auto p_tbsip_context_close = reinterpret_cast<tbsip_context_close_t>(close_func[0]);
-                if (p_tbsip_context_close) {
-                    p_tbsip_context_close(h_tbs_context);
+            if (hash_object_buffer) {
+                free(hash_object_buffer);
+                hash_object_buffer = nullptr;
+            }
+            if (h_bcrypt_alg) {
+                if (p_bcrypt_close_algorithm_provider) {
+                    p_bcrypt_close_algorithm_provider(h_bcrypt_alg, 0);
                 }
+                h_bcrypt_alg = nullptr;
+            }
+            if (h_tbs_context && p_tbsip_context_close) {
+                p_tbsip_context_close(h_tbs_context);
                 h_tbs_context = nullptr;
             }
             if (tbs_dll) {
@@ -13289,24 +13347,35 @@ public:
         void* bcrypt_funcs[7] = { nullptr };
         memory::get_function_address(bcrypt_dll, bcrypt_names, bcrypt_funcs, 7);
 
-        using bcrypt_open_algorithm_provider_t = NTSTATUS(__stdcall*)(BCRYPT_ALG_HANDLE*, LPCWSTR, LPCWSTR, ULONG);
-        using bcrypt_get_property_t = NTSTATUS(__stdcall*)(BCRYPT_HANDLE, LPCWSTR, PUCHAR, ULONG, ULONG*, ULONG);
-        using bcrypt_create_hash_t = NTSTATUS(__stdcall*)(BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE*, PUCHAR, ULONG, PUCHAR, ULONG, ULONG);
-        using bcrypt_hash_data_t = NTSTATUS(__stdcall*)(BCRYPT_HASH_HANDLE, PUCHAR, ULONG, ULONG);
-        using bcrypt_finish_hash_t = NTSTATUS(__stdcall*)(BCRYPT_HASH_HANDLE, PUCHAR, ULONG, ULONG);
-        using bcrypt_destroy_hash_t = NTSTATUS(__stdcall*)(BCRYPT_HASH_HANDLE);
-        using bcrypt_close_algorithm_provider_t = NTSTATUS(__stdcall*)(BCRYPT_ALG_HANDLE, ULONG);
-
-        const auto p_bcrypt_open_algorithm_provider = reinterpret_cast<bcrypt_open_algorithm_provider_t>(bcrypt_funcs[0]);
-        const auto p_bcrypt_get_property = reinterpret_cast<bcrypt_get_property_t>(bcrypt_funcs[1]);
-        const auto p_bcrypt_create_hash = reinterpret_cast<bcrypt_create_hash_t>(bcrypt_funcs[2]);
-        const auto p_bcrypt_hash_data = reinterpret_cast<bcrypt_hash_data_t>(bcrypt_funcs[3]);
-        const auto p_bcrypt_finish_hash = reinterpret_cast<bcrypt_finish_hash_t>(bcrypt_funcs[4]);
-        const auto p_bcrypt_destroy_hash = reinterpret_cast<bcrypt_destroy_hash_t>(bcrypt_funcs[5]);
-        const auto p_bcrypt_close_algorithm_provider = reinterpret_cast<bcrypt_close_algorithm_provider_t>(bcrypt_funcs[6]);
+        p_bcrypt_open_algorithm_provider = reinterpret_cast<bcrypt_open_algorithm_provider_t>(bcrypt_funcs[0]);
+        p_bcrypt_get_property = reinterpret_cast<bcrypt_get_property_t>(bcrypt_funcs[1]);
+        p_bcrypt_create_hash = reinterpret_cast<bcrypt_create_hash_t>(bcrypt_funcs[2]);
+        p_bcrypt_hash_data = reinterpret_cast<bcrypt_hash_data_t>(bcrypt_funcs[3]);
+        p_bcrypt_finish_hash = reinterpret_cast<bcrypt_finish_hash_t>(bcrypt_funcs[4]);
+        p_bcrypt_destroy_hash = reinterpret_cast<bcrypt_destroy_hash_t>(bcrypt_funcs[5]);
+        p_bcrypt_close_algorithm_provider = reinterpret_cast<bcrypt_close_algorithm_provider_t>(bcrypt_funcs[6]);
 
         if (!p_bcrypt_open_algorithm_provider || !p_bcrypt_get_property || !p_bcrypt_create_hash ||
             !p_bcrypt_hash_data || !p_bcrypt_finish_hash || !p_bcrypt_destroy_hash || !p_bcrypt_close_algorithm_provider) {
+            free_resources();
+            return false;
+        }
+
+        NTSTATUS b_status = p_bcrypt_open_algorithm_provider(&h_bcrypt_alg, L"SHA256", nullptr, 0);
+        if (b_status != 0) {
+            free_resources();
+            return false;
+        }
+
+        DWORD cb_data = sizeof(DWORD);
+        b_status = p_bcrypt_get_property(h_bcrypt_alg, L"ObjectLength", reinterpret_cast<PBYTE>(&cb_hash_object), cb_data, &cb_data, 0);
+        if (b_status != 0 || cb_hash_object == 0) {
+            free_resources();
+            return false;
+        }
+
+        hash_object_buffer = static_cast<u8*>(malloc(cb_hash_object));
+        if (!hash_object_buffer) {
             free_resources();
             return false;
         }
@@ -13320,14 +13389,10 @@ public:
         void* tbs_funcs[4] = { nullptr };
         memory::get_function_address(tbs_dll, tbs_names, tbs_funcs, 4);
 
-        using tbsi_context_create_t = TBS_RESULT(__stdcall*)(const void*, TBS_HCONTEXT*);
-        using tbsi_get_tcg_log_ex_t = TBS_RESULT(__stdcall*)(u32, u8*, u32*);
-        using tbsip_submit_command_t = TBS_RESULT(__stdcall*)(TBS_HCONTEXT, u32, u32, const u8*, u32, u8*, u32*);
-
-        const auto p_tbsi_context_create = reinterpret_cast<tbsi_context_create_t>(tbs_funcs[0]);
-        const auto p_tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_t>(tbs_funcs[1]);
-        const auto p_tbsip_submit_command = reinterpret_cast<tbsip_submit_command_t>(tbs_funcs[2]);
-        const auto p_tbsip_context_close = reinterpret_cast<tbsip_context_close_t>(tbs_funcs[3]);
+        p_tbsi_context_create = reinterpret_cast<tbsi_context_create_t>(tbs_funcs[0]);
+        p_tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_t>(tbs_funcs[1]);
+        p_tbsip_submit_command = reinterpret_cast<tbsip_submit_command_t>(tbs_funcs[2]);
+        p_tbsip_context_close = reinterpret_cast<tbsip_context_close_t>(tbs_funcs[3]);
 
         if (!p_tbsi_context_create || !p_tbsi_get_tcg_log_ex || !p_tbsip_submit_command || !p_tbsip_context_close) {
             free_resources();
@@ -13335,32 +13400,9 @@ public:
         }
 
         auto calculate_sha256 = [&](const u8* const VMAWARE_RESTRICT data, const u32 size, u8* const VMAWARE_RESTRICT out_digest) noexcept -> bool {
-            BCRYPT_ALG_HANDLE h_alg = nullptr;
             BCRYPT_HASH_HANDLE h_hash = nullptr;
-            DWORD cb_hash_object = 0;
-            DWORD cb_data = sizeof(DWORD);
-
-            NTSTATUS status = p_bcrypt_open_algorithm_provider(&h_alg, L"SHA256", nullptr, 0);
+            NTSTATUS status = p_bcrypt_create_hash(h_bcrypt_alg, &h_hash, hash_object_buffer, cb_hash_object, nullptr, 0, 0);
             if (status != 0) return false;
-
-            status = p_bcrypt_get_property(h_alg, L"ObjectLength", reinterpret_cast<PBYTE>(&cb_hash_object), cb_data, &cb_data, 0);
-            if (status != 0) {
-                p_bcrypt_close_algorithm_provider(h_alg, 0);
-                return false;
-            }
-
-            u8* const hash_object = static_cast<u8*>(_malloca(cb_hash_object));
-            if (!hash_object) {
-                p_bcrypt_close_algorithm_provider(h_alg, 0);
-                return false;
-            }
-
-            status = p_bcrypt_create_hash(h_alg, &h_hash, hash_object, cb_hash_object, nullptr, 0, 0);
-            if (status != 0) {
-                _freea(hash_object);
-                p_bcrypt_close_algorithm_provider(h_alg, 0);
-                return false;
-            }
 
             status = p_bcrypt_hash_data(h_hash, const_cast<PUCHAR>(data), size, 0);
             if (status == 0) {
@@ -13368,8 +13410,6 @@ public:
             }
 
             p_bcrypt_destroy_hash(h_hash);
-            _freea(hash_object);
-            p_bcrypt_close_algorithm_provider(h_alg, 0);
             return (status == 0);
         };
 
@@ -13408,6 +13448,7 @@ public:
                 (static_cast<u32>(resp[offset + 1]) << 16) |
                 (static_cast<u32>(resp[offset + 2]) << 8) |
                 resp[offset + 3];
+
             offset += 4;
             if (sel_count != 1) return false;
 
@@ -13421,6 +13462,7 @@ public:
                 (static_cast<u32>(resp[offset + 1]) << 16) |
                 (static_cast<u32>(resp[offset + 2]) << 8) |
                 resp[offset + 3];
+
             offset += 4;
             if (digest_count != 1) return false;
 
@@ -13429,12 +13471,14 @@ public:
             offset += 2;
 
             if (offset + digest_size > resp_size) return false;
+
             if (out_digest) {
                 memcpy(out_digest, resp + offset, digest_size > 32 ? 32 : digest_size);
             }
             if (out_digest_size) {
                 *out_digest_size = digest_size;
             }
+
             return true;
         };
 
@@ -13474,39 +13518,64 @@ public:
 
         size_t offset = 0;
 
+        bool header_parsed = false;
         if (offset + sizeof(tcg_pcr_event_header) <= log_size) {
-            const auto* const first_header = reinterpret_cast<const tcg_pcr_event_header*>(log_buffer + offset);
+            const u32 first_event_type = read_u32(log_buffer + offset + 4);
+            const u32 first_event_size = read_u32(log_buffer + offset + 28);
             offset += sizeof(tcg_pcr_event_header);
 
-            if (offset + first_header->event_size <= log_size) {
+            if (offset + first_event_size <= log_size) {
                 const u8* const first_event_data = log_buffer + offset;
-                offset += first_header->event_size;
+                offset += first_event_size;
 
-                if (first_header->event_type == 0x03 && first_header->event_size >= 24) {
+                if (first_event_type == 0x03 && first_event_size >= 24) {
                     if (memcmp(first_event_data, "Spec ID Event03", 15) == 0) {
-                        const u8 num_algs = *reinterpret_cast<const u8*>(first_event_data + 23);
+                        const u8 num_algs = first_event_data[23];
                         u32 alg_offset = 24;
+                        bool has_sha256 = false;
+
                         for (u32 i = 0; i < num_algs; ++i) {
-                            if (alg_offset + 4 > first_header->event_size) break;
-                            const u16 alg_id = *reinterpret_cast<const u16*>(first_event_data + alg_offset);
-                            const u16 digest_size = *reinterpret_cast<const u16*>(first_event_data + alg_offset + 2);
+                            if (alg_offset + 4 > first_event_size) {
+                                break;
+                            }
+                            const u16 alg_id = read_u16(first_event_data + alg_offset);
+                            const u16 digest_size = read_u16(first_event_data + alg_offset + 2);
                             alg_to_size.set(alg_id, digest_size);
+
+                            if (alg_id == 0x000B && digest_size == 32) {
+                                has_sha256 = true;
+                            }
                             alg_offset += 4;
+                        }
+
+                        if (has_sha256) {
+                            header_parsed = true;
                         }
                     }
                 }
             }
         }
 
+        if (!header_parsed) {
+            free_resources();
+            return false;
+        }
+
         /* Process log packets sequentially */
         while (offset < log_size) {
-            if (offset + 8 > log_size) break;
-            const u32 pcr_index = *reinterpret_cast<const u32*>(log_buffer + offset);
-            const u32 event_type = *reinterpret_cast<const u32*>(log_buffer + offset + 4);
+            if (offset + 8 > log_size) {
+                free_resources();
+                return false;
+            }
+            const u32 pcr_index = read_u32(log_buffer + offset);
+            const u32 event_type = read_u32(log_buffer + offset + 4);
             offset += 8;
 
-            if (offset + 4 > log_size) break;
-            const u32 digest_count = *reinterpret_cast<const u32*>(log_buffer + offset);
+            if (offset + 4 > log_size) {
+                free_resources();
+                return false;
+            }
+            const u32 digest_count = read_u32(log_buffer + offset);
             offset += 4;
 
             struct temp_digest {
@@ -13518,16 +13587,30 @@ public:
             temp_digest temp_digests[16]{};
             u32 temp_digest_count = 0;
             bool parse_success = true;
+            bool has_sha256 = false;
 
             for (u32 i = 0; i < digest_count; ++i) {
-                if (offset + 2 > log_size) { parse_success = false; break; }
-                const u16 alg_id = *reinterpret_cast<const u16*>(log_buffer + offset);
+                if (offset + 2 > log_size) { 
+                    parse_success = false;
+                    break;
+                }
+                const u16 alg_id = read_u16(log_buffer + offset);
                 offset += 2;
 
                 bool found = false;
                 const u16 size = alg_to_size.get(alg_id, &found);
-                if (!found) { parse_success = false; break; }
-                if (offset + size > log_size) { parse_success = false; break; }
+                if (!found) { 
+                    parse_success = false;
+                    break;
+                }
+                if (offset + size > log_size) { 
+                    parse_success = false; 
+                    break;
+                }
+
+                if (alg_id == 0x000B) {
+                    has_sha256 = true;
+                }
 
                 if (temp_digest_count < 16) {
                     temp_digests[temp_digest_count].alg_id = alg_id;
@@ -13538,13 +13621,22 @@ public:
                 offset += size;
             }
 
-            if (!parse_success) break;
+            if (!parse_success || !has_sha256) {
+                free_resources();
+                return false;
+            }
 
-            if (offset + 4 > log_size) break;
-            const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + offset);
+            if (offset + 4 > log_size) {
+                free_resources();
+                return false;
+            }
+            const u32 event_size = read_u32(log_buffer + offset);
             offset += 4;
 
-            if (offset + event_size > log_size) break;
+            if (offset + event_size > log_size) {
+                free_resources();
+                return false;
+            }
             offset += event_size;
 
             for (u32 i = 0; i < temp_digest_count; ++i) {
@@ -13552,9 +13644,11 @@ public:
                     tracked_event ev{};
                     ev.event_type = event_type;
                     ev.digest_size = temp_digests[i].size;
-                    memset(ev.digest, 0, 32);
                     memcpy(ev.digest, temp_digests[i].digest, temp_digests[i].size > 32 ? 32 : temp_digests[i].size);
-                    pcr_events[pcr_index].push(ev);
+                    if (!pcr_events[pcr_index].push(ev)) {
+                        free_resources();
+                        return false;
+                    }
                 }
             }
         }
@@ -13599,9 +13693,9 @@ public:
         return passthrough_detected;
     }
 
+
     /*
      * ADD NEW TECHNIQUE FUNCTION HERE
-     *
      */
     #if (CLANG)
         #pragma clang diagnostic pop
@@ -14348,7 +14442,6 @@ public:
             case HANDLES: return "HANDLES";
             case QEMU_FW_CFG: return "QEMU_FW_CFG";
             case VIRTUAL_PROCESSORS: return "VIRTUAL_PROCESSORS";
-            case HYPERVISOR_QUERY: return "HYPERVISOR_QUERY";
             case AMD_SEV_MSR: return "AMD_SEV_MSR";
             case VIRTUAL_REGISTRY: return "VIRTUAL_REGISTRY";
             case FIRMWARE: return "FIRMWARE";
@@ -14820,7 +14913,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::EIP_OVERFLOW, {100, VM::eip_overflow}},
             {VM::HYPERVISOR_HOOK, {100, VM::hypervisor_hook}},
             {VM::SINGLE_STEP, {100, VM::single_step}},
-            {VM::TPM_PASSTHROUGH, {100, VM::tpm_passthrough}},
+            {VM::TPM_PASSTHROUGH, {45, VM::tpm_passthrough}},
             {VM::NVRAM, {100, VM::nvram}},
             {VM::CPU_HEURISTIC, {90, VM::cpu_heuristic}},
             {VM::ACPI_SIGNATURE, {100, VM::acpi_signature}},
@@ -14833,7 +14926,6 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::DBVM, {150, VM::dbvm}},
             {VM::UD, {100, VM::ud}},
             {VM::DRIVERS, {100, VM::drivers}},
-            {VM::HYPERVISOR_QUERY, {100, VM::hypervisor_query}},
             {VM::HANDLES, {100, VM::device_handles}},
             {VM::KERNEL_OBJECTS, {100, VM::kernel_objects}},
             {VM::DLL, {50, VM::dll}},
