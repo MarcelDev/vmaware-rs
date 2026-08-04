@@ -1,6 +1,6 @@
 [package]
 name = "vmaware"
-version = "0.1.0"
+version = "null"
 edition = "2024"
 
 [dependencies]
