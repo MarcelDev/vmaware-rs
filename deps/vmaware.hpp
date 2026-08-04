@@ -628,8 +628,7 @@ public:
         VPC_INVALID,
         VMWARE_STR,
         GAMARUE,
-        CUCKOO_DIR,
-        CUCKOO_PIPE,
+        CUCKOO,
         TRAP,
         UD,
         INTERRUPT_SHADOW,
@@ -3202,7 +3201,8 @@ public:
             static u32 thread_count_cache;
 
             static u32 fetch() noexcept {
-                if (thread_count_cache != 0) {
+                if (VMAWARE_LIKELY(thread_count_cache != 0)) {
+                    VMAWARE_ASSUME(thread_count_cache != 0);
                     return thread_count_cache;
                 }
                 thread_count_cache = std::thread::hardware_concurrency();
@@ -4025,11 +4025,12 @@ public:
         #endif
     #endif
 
-            if (!peb) { /* not x86 or tampered with */
+            if (VMAWARE_UNLIKELY(!peb)) { /* not x86 or tampered with */
                 const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
                 if (ntdll) cached_ntdll = ntdll;
                 return ntdll;
             }
+            VMAWARE_ASSUME(peb != nullptr);
 
             PPEB_LDR_DATA ldr = peb->Ldr;
             if (!ldr) {
@@ -4254,9 +4255,10 @@ public:
         };
 
         static std::string narrow_wide(const wchar_t* wstr) {
-            if (!wstr) {
+            if (VMAWARE_UNLIKELY(!wstr)) {
                 return {};
             }
+            VMAWARE_ASSUME(wstr != nullptr);
 
             std::string result;
             const wchar_t* p = wstr;
@@ -6539,7 +6541,7 @@ public:
                 debug("TIMER: Detected #VMEXIT latency"); 
                 hypervisor_detected = true;
             }
-            else if (best_cpuid_l >= 2500 || best_ref_l >= 2500) { /* If latency is abnormally high, it means something was spamming interrupts */
+            else if (best_cpuid_l >= 10000 || best_ref_l >= 10000) { /* If latency is abnormally high, it means something was spamming interrupts */
                 debug("TIMER: Detected artificial IPI delivery to timing threads");
                 hypervisor_detected = true;
             }
@@ -9923,13 +9925,13 @@ public:
 
 
     /**
-     * @brief Check for cuckoo directory using crt and WIN API directory functions
+     * @brief Check for Cuckoo Sandbox artifacts (directory and communication pipe)
      * @category Windows
-     * @author 一半人生
+     * @author 一半人生, Thomas Roccia (fr0gger)
      * @link https://unprotect.it/snippet/checking-specific-folder-name/196/
-     * @implements VM::CUCKOO_DIR
+     * @implements VM::CUCKOO
      */
-    [[nodiscard]] static bool cuckoo_dir() {
+    [[nodiscard]] static bool cuckoo() {
         const HMODULE ntdll = memory::get_ntdll();
         if (!ntdll) return false;
 
@@ -9943,7 +9945,6 @@ public:
         using rtl_init_unicode_string_t = void(__stdcall*)(PUNICODE_STRING DestinationString, PCWSTR SourceString);
         using ntclose_t = NTSTATUS(__stdcall*)(HANDLE Handle);
 
-
         const auto nt_open_file = reinterpret_cast<nt_openfile_t>(functions[0]);
         const auto rtl_init_unicode_string = reinterpret_cast<rtl_init_unicode_string_t>(functions[1]);
         const auto nt_close = reinterpret_cast<ntclose_t>(functions[2]);
@@ -9952,83 +9953,50 @@ public:
             return false;
         }
 
-        constexpr const wchar_t* native_path = L"\\??\\C:\\Cuckoo";
-        UNICODE_STRING path;
-        rtl_init_unicode_string(&path, native_path);
+        struct target_artifact {
+            const wchar_t* path;
+            ACCESS_MASK desired_access;
+            ULONG share_access;
+            ULONG open_options;
+        };
 
-        OBJECT_ATTRIBUTES object_attributes;
-        ZeroMemory(&object_attributes, sizeof(object_attributes));
-        object_attributes.Length = sizeof(object_attributes);
-        object_attributes.ObjectName = &path;
-        object_attributes.Attributes = OBJ_CASE_INSENSITIVE;
+        const target_artifact targets[] = {
+            /* Cuckoo Directory */
+            {
+                L"\\??\\C:\\Cuckoo",
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE
+            },
+            /* Cuckoo Pipe */
+            {
+                L"\\??\\pipe\\cuckoo",
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+                0,
+                FILE_OPEN | FILE_SYNCHRONOUS_IO_NONALERT
+            }
+        };
 
-        IO_STATUS_BLOCK iosb;
-        HANDLE hFile = nullptr;
+        for (const auto& target : targets) {
+            UNICODE_STRING path;
+            rtl_init_unicode_string(&path, target.path);
 
-        constexpr ACCESS_MASK desired_access = FILE_READ_ATTRIBUTES; 
-        constexpr ULONG share_access = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-        constexpr ULONG open_options = FILE_OPEN | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE;
+            OBJECT_ATTRIBUTES object_attributes;
+            ZeroMemory(&object_attributes, sizeof(object_attributes));
+            object_attributes.Length = sizeof(object_attributes);
+            object_attributes.ObjectName = &path;
+            object_attributes.Attributes = OBJ_CASE_INSENSITIVE;
 
-        const NTSTATUS st = nt_open_file(&hFile, desired_access, &object_attributes, &iosb, share_access, open_options);
-        if (NT_SUCCESS(st)) {
-            if (hFile) nt_close(hFile);
-            return core::add(brand_enum::CUCKOO);
-        }
+            IO_STATUS_BLOCK iosb;
+            HANDLE handle = nullptr;
 
-        return false;
-    }
-                
-                
-    /**
-     * @brief Check for Cuckoo specific piping mechanism
-     * @category Windows
-     * @author Thomas Roccia (fr0gger)
-     * @link https://unprotect.it/snippet/checking-specific-folder-name/196/
-     * @implements VM::CUCKOO_PIPE
-     */
-    [[nodiscard]] static bool cuckoo_pipe() {
-        using ntopenfile_t = NTSTATUS(__stdcall*)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
-            POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock,
-            ULONG ShareAccess, ULONG OpenOptions);
-        using rtl_init_unicode_string_t = void(__stdcall*)(PUNICODE_STRING DestinationString, PCWSTR SourceString);
-        using ntclose_t = NTSTATUS(__stdcall*)(HANDLE Handle);
-
-        const HMODULE ntdll = memory::get_ntdll();
-        if (!ntdll) return false;
-
-        constexpr const char* function_names[] = { "NtOpenFile", "RtlInitUnicodeString", "NtClose" };
-        void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
-
-        const auto nt_open_file = reinterpret_cast<ntopenfile_t>(functions[0]);
-        const auto rtl_init_unicode_string = reinterpret_cast<rtl_init_unicode_string_t>(functions[1]);
-        const auto nt_close = reinterpret_cast<ntclose_t>(functions[2]);
-
-        if (!nt_open_file || !rtl_init_unicode_string || !nt_close) {
-            return false;
-        }
-
-        constexpr const wchar_t* pipe_path = L"\\??\\pipe\\cuckoo";
-        UNICODE_STRING pipe;
-        rtl_init_unicode_string(&pipe, pipe_path);
-
-        OBJECT_ATTRIBUTES object_attributes;
-        ZeroMemory(&object_attributes, sizeof(object_attributes));
-        object_attributes.Length = sizeof(object_attributes);
-        object_attributes.ObjectName = &pipe;
-        object_attributes.Attributes = OBJ_CASE_INSENSITIVE;
-
-        IO_STATUS_BLOCK iosb;
-        HANDLE h_pipe = nullptr;
-
-        constexpr ACCESS_MASK desired_access = FILE_READ_DATA | FILE_READ_ATTRIBUTES;
-        constexpr ULONG share_access = 0;
-        constexpr ULONG open_options = FILE_OPEN | FILE_SYNCHRONOUS_IO_NONALERT;
-
-        const NTSTATUS st = nt_open_file(&h_pipe, desired_access, &object_attributes, &iosb, share_access, open_options);
-        if (NT_SUCCESS(st)) {
-            if (h_pipe) nt_close(h_pipe);
-            return core::add(brand_enum::CUCKOO);
+            const NTSTATUS st = nt_open_file(&handle, target.desired_access, &object_attributes, &iosb, target.share_access, target.open_options);
+            if (NT_SUCCESS(st)) {
+                if (handle) {
+                    nt_close(handle);
+                }
+                return core::add(brand_enum::CUCKOO);
+            }
         }
 
         return false;
@@ -12948,8 +12916,7 @@ public:
         if (!handler_ptr) return false;
 
         /*
-         * Recovery jump target for veh
-         *
+         * Recovery jump target for VEH
          * dynamically allocate a 32-bit compatible stack (must reside below 4GB)
          */
         PVOID stack32_base = nullptr;
@@ -12977,9 +12944,14 @@ public:
 
         if (alloc_status >= 0) {
             if (boundary_base == reinterpret_cast<PVOID>(0xFFFF0000ULL)) {
-                /* Inject cpuid at the strict end of the compat-mode space, volatile to prevent C6011 or Clang's static analyzer from flagging dereferences of the hardcoded memory address */
-                volatile uintptr_t raw_execution_target = 0xFFFFFFFEULL;
-                u8* execution_target = reinterpret_cast<u8*>(raw_execution_target);
+                /* Inject cpuid at the strict end of the compat-mode space */
+                u8* execution_target = reinterpret_cast<u8*>(boundary_base) + 0xFFFEULL;
+
+                /* Break Clang static analyzer's tracking of execution_target as a compile-time constant */
+            #if (GCC || CLANG)
+                asm volatile("" : "+r"(execution_target));
+            #endif
+
                 execution_target[0] = 0x0F;
                 execution_target[1] = 0xA2;
 
@@ -14058,7 +14030,7 @@ public:
             }
 
             /* For custom VM techniques, won't be used most of the time */
-            if (!core::custom_table.empty()) {
+            if (VMAWARE_UNLIKELY(!core::custom_table.empty())) {
                 for (const auto& technique : core::custom_table) {
 
                     /* If cached, return that result */
@@ -14491,9 +14463,10 @@ public:
             throw std::invalid_argument(msg);
         };
 
-        if (percent > 100) {
+        if (VMAWARE_UNLIKELY(percent > 100)) {
             throw_error("Percentage parameter must be between 0 and 100");
         }
+        VMAWARE_ASSUME(percent <= 100);
 
         const size_t current_index = core::custom_table.size();
 
@@ -14565,8 +14538,7 @@ public:
             case VMWARE_STR: return "VMWARE_STR";
             case MUTEX: return "MUTEX";
             case THREAD_MISMATCH: return "THREAD_MISMATCH";
-            case CUCKOO_DIR: return "CUCKOO_DIR";
-            case CUCKOO_PIPE: return "CUCKOO_PIPE";
+            case CUCKOO: return "CUCKOO";
             case AZURE: return "AZURE";
             case DISPLAY: return "DISPLAY";
             case BLUESTACKS_FOLDERS: return "BLUESTACKS_FOLDERS";
@@ -15044,21 +15016,21 @@ VM::u16 VM::technique_count = VM::base_technique_count;
 std::vector<VM::core::custom_technique> VM::core::custom_table = {};
 size_t VM::core::custom_table_size = 0;
 
-/* The 0~100 points are debatable, but we think it's fine how it is. Feel free to disagree */
+/* The points are debatable, but we think it's fine how it is. Feel free to disagree */
 std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = []() {
     std::array<VM::core::technique, VM::enum_size + 1> table{};
     /* FORMAT: { VM::<ID>, { certainty%, function pointer } }, */
     const VM::core::technique_entry entries[] = {
         // START OF TECHNIQUE TABLE
         #if (WINDOWS)
-            {VM::TRAP, {100, VM::trap}},
+            {VM::TRAP, {150, VM::trap}},
             {VM::KVM_INTERCEPTION, {150, VM::kvm_interception}},
             {VM::SVM_EXCEPTIONS, {35, VM::svm_exceptions}},
-            {VM::MEASURED_BOOT, {100, VM::measured_boot}},
-            {VM::INTERRUPT_SHADOW, {100, VM::interrupt_shadow}},
-            {VM::EIP_OVERFLOW, {100, VM::eip_overflow}},
-            {VM::HYPERVISOR_HOOK, {100, VM::hypervisor_hook}},
-            {VM::SINGLE_STEP, {100, VM::single_step}},
+            {VM::MEASURED_BOOT, {150, VM::measured_boot}},
+            {VM::INTERRUPT_SHADOW, {150, VM::interrupt_shadow}},
+            {VM::EIP_OVERFLOW, {150, VM::eip_overflow}},
+            {VM::HYPERVISOR_HOOK, {150, VM::hypervisor_hook}},
+            {VM::SINGLE_STEP, {150, VM::single_step}},
             {VM::TPM_PASSTHROUGH, {45, VM::tpm_passthrough}},
             {VM::NVRAM, {100, VM::nvram}},
             {VM::CPU_HEURISTIC, {90, VM::cpu_heuristic}},
@@ -15068,7 +15040,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::GPU_CAPABILITIES, {20, VM::gpu_capabilities}},
             {VM::MSR, {100, VM::msr}},
             {VM::VIRTUAL_PROCESSORS, {100, VM::virtual_processors}},
-            {VM::WINE, {100, VM::wine}},
+            {VM::WINE, {150, VM::wine}},
             {VM::DBVM, {150, VM::dbvm}},
             {VM::UD, {100, VM::ud}},
             {VM::DRIVERS, {100, VM::drivers}},
@@ -15082,8 +15054,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::VPC_INVALID, {75, VM::vpc_invalid}},
             {VM::VMWARE_STR, {35, VM::vmware_str}},
             {VM::GAMARUE, {10, VM::gamarue}},
-            {VM::CUCKOO_DIR, {30, VM::cuckoo_dir}},
-            {VM::CUCKOO_PIPE, {30, VM::cuckoo_pipe}},
+            {VM::CUCKOO, {30, VM::cuckoo}},
         #endif
 
         #if (LINUX || WINDOWS)
@@ -15091,8 +15062,8 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::DEVICES, {95, VM::pci_devices}},
             {VM::SYSTEM_REGISTERS, {50, VM::system_registers}},
             {VM::AZURE, {30, VM::azure}},
-            {VM::BOOT_LOGO, {100, VM::boot_logo}},
-            {VM::DISK_SERIAL, {100, VM::disk_serial_number}},
+            {VM::BOOT_LOGO, {90, VM::boot_logo}},
+            {VM::DISK_SERIAL, {150, VM::disk_serial_number}},
         #endif
 
         #if (LINUX)
@@ -15144,8 +15115,8 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
         {VM::VMID, {100, VM::vmid}},
         {VM::CPU_BRAND, {95, VM::cpu_brand}},
         {VM::CPUID_SIGNATURE, {95, VM::cpuid_signature}},
-        {VM::HYPERVISOR_STR, {100, VM::hypervisor_str}},
-        {VM::HYPERVISOR_BIT, {100, VM::hypervisor_bit}},
+        {VM::HYPERVISOR_STR, {150, VM::hypervisor_str}},
+        {VM::HYPERVISOR_BIT, {150, VM::hypervisor_bit}},
         {VM::BOCHS_CPU, {100, VM::bochs_cpu}},
         {VM::KGT_SIGNATURE, {80, VM::intel_kgt_signature}}
         /* END OF TECHNIQUE TABLE */
