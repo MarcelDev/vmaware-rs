@@ -4,7 +4,7 @@
  * ██║   ██║██╔████╔██║███████║██║ █╗ ██║███████║██████╔╝█████╗
  * ╚██╗ ██╔╝██║╚██╔╝██║██╔══██║██║███╗██║██╔══██║██╔══██╗██╔══╝
  *  ╚████╔╝ ██║ ╚═╝ ██║██║  ██║╚███╔███╔╝██║  ██║██║  ██║███████╗
- *   ╚═══╝  ╚═╝     ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ Experimental post-2.8.0 (July 2026)
+ *   ╚═══╝  ╚═╝     ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝ Experimental post-2.8.0 (August 2026)
  *
  *  C++ VM detection library
  *
@@ -359,6 +359,34 @@
 #else
     #define VMAWARE_LIKELY(x)   (x)
     #define VMAWARE_UNLIKELY(x) (x)
+#endif
+
+#if (GCC || CLANG)
+    #define VMAWARE_PREFETCH(ptr, hint) \
+            __builtin_prefetch(const_cast<const void*>(reinterpret_cast<const volatile void*>(ptr)), 0, 3)
+#elif (MSVC)
+    #if (x86)
+        #define VMAWARE_PREFETCH(ptr, hint) \
+            _mm_prefetch(reinterpret_cast<const char*>(const_cast<void*>(reinterpret_cast<const volatile void*>(ptr))), hint)
+    #else
+        #define VMAWARE_PREFETCH(ptr, hint)
+    #endif
+#else
+    #define VMAWARE_PREFETCH(ptr, hint)
+#endif
+
+#if (x86)
+    #if (MSVC) || defined(__vectorcall)
+        #define VMAWARE_VECTORCALL __vectorcall
+    #elif (GCC || CLANG)
+        #if (x86)
+            #define VMAWARE_VECTORCALL __attribute__((vectorcall))
+        #else
+            #define VMAWARE_VECTORCALL
+        #endif
+    #else
+        #define VMAWARE_VECTORCALL
+    #endif
 #endif
 
 #define VMAWARE_UNUSED(x) ((void)(x))
@@ -1110,6 +1138,7 @@ public:
                     cache = &leaf_40000100;
                     break;
                 default:
+                    /* VMAWARE_ASSUME(0); */
                     return "";
             }
 
@@ -3824,6 +3853,8 @@ public:
 
         /* Retrieves the addresses of specified functions from a loaded module using the export directory, manual implementation of GetProcAddress */
         static void get_function_address(const HMODULE hModule, const char* const VMAWARE_RESTRICT names[], void** const VMAWARE_RESTRICT functions, const size_t count) {
+            VMAWARE_ASSUME(names != nullptr);
+            VMAWARE_ASSUME(functions != nullptr);
             using func_map = std::unordered_map<std::string, void*>;
             static std::unordered_map<HMODULE, func_map> function_cache;
 
@@ -4112,6 +4143,7 @@ public:
     #if (LINUX)
         /* Fetch file data */
         [[nodiscard]] static std::string read_file(const char* raw_path) {
+            VMAWARE_ASSUME(raw_path != nullptr);
             std::string path;
             const std::string raw_path_str = raw_path;
 
@@ -4154,17 +4186,19 @@ public:
         #endif
         }
 
-        static bool is_directory(const char* path) {
+        [[nodiscard]] static bool is_directory(const char* path) {
+            VMAWARE_ASSUME(path != nullptr);
             struct stat info{};
             if (stat(path, &info) != 0) {
                 return false;
             }
             return (info.st_mode & S_IFDIR); /* check if directory */
-        };
+        }
     #endif
 
         /* Fetch the file but in binary form */
         [[nodiscard]] static std::vector<u8> read_file_binary(const char* file_path) {
+            VMAWARE_ASSUME(file_path != nullptr);
             std::ifstream file(file_path, std::ios::binary);
 
             if (!file) {
@@ -4224,6 +4258,7 @@ public:
         }
 
         [[nodiscard]] static bool find(const std::string& base_str, const char* keyword) noexcept {
+            VMAWARE_ASSUME(keyword != nullptr);
             return (base_str.find(keyword) != std::string::npos);
         };
 
@@ -4281,10 +4316,6 @@ public:
             oss << narrow_wide(arg);
         }
 
-        static void append_to_stream(std::ostringstream& oss, wchar_t* arg) {
-            oss << narrow_wide(arg);
-        }
-
         static void append_to_stream(std::ostringstream& oss, const std::wstring& ws) {
             oss << narrow_wide(ws.c_str());
         }
@@ -4299,11 +4330,11 @@ public:
             }
         }
 
-        static void append_to_stream(std::ostringstream& oss, char c) {
+        static void append_to_stream(std::ostringstream& oss, const char c) {
             oss << c;
         }
 
-        static void append_to_stream(std::ostringstream& oss, bool b) {
+        static void append_to_stream(std::ostringstream& oss, const bool b) {
             oss << (b ? "true" : "false");
         }
 
@@ -4373,6 +4404,7 @@ public:
             return util::make_unique<std::string>();
         #else
             #if (LINUX || APPLE)
+                VMAWARE_ASSUME(cmd != nullptr);
                 struct file_deleter {
                     void operator()(FILE* f) const noexcept {
                         if (f) {
@@ -4407,6 +4439,7 @@ public:
 
         [[nodiscard]] static bool is_proc_running(const char* executable) {
         #if (LINUX)
+            VMAWARE_ASSUME(executable != nullptr);
             #if (VMA_CPP >= 17)
                 for (const auto& entry : std::filesystem::directory_iterator("/proc")) {
                     if (!entry.is_directory()) {
@@ -4716,16 +4749,15 @@ public:
 
             /* Check if the virtualization infrastructure driver is present */
             auto is_hyperv_service_present = []() noexcept -> bool {
-                const HMODULE ntdll_hmodule = memory::get_ntdll();
-                if (!ntdll_hmodule) return false;
+                const HMODULE ntdll = memory::get_ntdll();
+                if (!ntdll) return false;
 
                 constexpr const char* nt_names[] = { "NtQuerySystemInformation" };
                 void* nt_funcs[1] = {};
-                memory::get_function_address(ntdll_hmodule, nt_names, nt_funcs, 1);
+                memory::get_function_address(ntdll, nt_names, nt_funcs, 1);
 
-                using nt_query_sysinfo_fn = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
-                const auto nt_query_system_information =
-                    reinterpret_cast<nt_query_sysinfo_fn>(nt_funcs[0]);
+                using nt_query_sysinfo_fn = NTSTATUS(__stdcall*)(ULONG, PVOID, ULONG, PULONG);
+                const auto nt_query_system_information = reinterpret_cast<nt_query_sysinfo_fn>(nt_funcs[0]);
                 if (!nt_query_system_information) return false;
 
                 typedef struct _RTL_PROCESS_MODULE_INFORMATION {
@@ -5188,20 +5220,22 @@ public:
             }
 
             /* Software fallback CRC32-C (Castagnoli) of a block of memory */
-            static u32 crc32c_sw(u32 crc, const void* VMAWARE_RESTRICT data, size_t len) noexcept {
-                VMAWARE_ASSUME(data != nullptr);
+            static u32 crc32c_sw(u32 crc, const void* VMAWARE_RESTRICT data, const size_t len) noexcept {
+                if (len > 0) VMAWARE_ASSUME(data != nullptr); 
                 const u8* ptr = reinterpret_cast<const u8*>(data);
+
                 for (size_t i = 0; i < len; ++i) {
                     crc ^= ptr[i];
                     for (int j = 0; j < 8; ++j) {
                         crc = (crc >> 1) ^ ((crc & 1) ? 0x82F63B78u : 0);
                     }
                 }
+
                 return crc;
             }
 
             /* Software fallback CRC32-C for a single byte */
-            static VMAWARE_CONSTEXPR u32 crc32c_byte_sw(u32 crc, char data) noexcept {
+            static VMAWARE_CONSTEXPR u32 crc32c_byte_sw(u32 crc, const char data) noexcept {
                 crc ^= static_cast<u8>(data);
                 for (int i = 0; i < 8; ++i) {
                     crc = (crc >> 1) ^ ((crc & 1) ? 0x82F63B78u : 0);
@@ -5213,7 +5247,7 @@ public:
        #if (x86 && (GCC || CLANG))
             __attribute__((__target__("sse4.2")))
         #endif
-            static u32 crc32c_byte(u32 crc, char data) noexcept {
+            static u32 crc32c_byte(u32 crc, const char data) noexcept {
                 #if (x86)
                 if (has_sse42()) {
                     return _mm_crc32_u8(crc, static_cast<u8>(data));
@@ -5225,7 +5259,7 @@ public:
         #if (x86 && (GCC || CLANG))
             __attribute__((__target__("sse4.2")))
         #endif
-            static u32 crc32c(u32 crc, const void* data, size_t len) noexcept {
+            static u32 crc32c(u32 crc, const void* data, const size_t len) noexcept {
                 if (!has_sse42()) {
                     return crc32c_sw(crc, data, len);
                 }
@@ -5240,10 +5274,11 @@ public:
                 u64 crc64 = crc;
 
                 for (; i < qwords; ++i) {
+                    VMAWARE_PREFETCH(&qptr[i + 8], _MM_HINT_T0);
                     crc64 = _mm_crc32_u64(crc64, qptr[i]);
                 }
                 crc = static_cast<u32>(crc64);
-                i <<= 3; /* convert QWord count to bytes */
+                i <<= 3; /* Convert QWord count to bytes */
             #else
                 const size_t dwords = len >> 2;
                 const u32* dptr = reinterpret_cast<const u32*>(data);
@@ -5251,7 +5286,7 @@ public:
                 for (; i < dwords; ++i) {
                     crc = _mm_crc32_u32(crc, dptr[i]);
                 }
-                i <<= 2; /* convert DWord count to bytes */
+                i <<= 2; /* Convert DWord count to bytes */
             #endif
 
                 /* Hash any remaining trailing bytes */
@@ -5588,6 +5623,7 @@ public:
         }
         
         static std::string brand_multiple(const brand_list_t& list) {
+            /* VMAWARE_ASSUME(!list.empty()); */
             std::string buffer = {};
             buffer += brands::brand_enum_to_string(list[0].first);
 
@@ -5612,6 +5648,7 @@ public:
         }
 
         static enum brand_enum brand_single(const brand_list_t& list) noexcept {
+            /* VMAWARE_ASSUME(!list.empty()); */
             const brand_element_t brand = list.front();
             return brand.first;
         }
@@ -6671,6 +6708,7 @@ public:
                      * the amount of instructions (8 in case of LFENCE) are enough for the Cross-Core/Cross-CCD MESI RFO cache bounce in the data race so that the counter thread sees an increment
                      */
                     sync = *counter_ptr;
+                    VMAWARE_PREFETCH(counter_ptr, _MM_HINT_T0);
                     while (*counter_ptr == sync); /* fastest busy-waiting strategy, PAUSE can conditionally exit, calling APIs like SwitchToThread() would be even worse */
 
                     r_pre = *counter_ptr;
@@ -6682,6 +6720,7 @@ public:
                     sync = *counter_ptr;
                     while (*counter_ptr == sync); /* sync to our counter tick again by spam hitting L3 */
                     sync = *counter_ptr;
+                    VMAWARE_PREFETCH(counter_ptr, _MM_HINT_T0);
                     while (*counter_ptr == sync); /* and again */
 
                     v_pre = *counter_ptr;
@@ -6722,6 +6761,7 @@ public:
                     sync = *counter_ptr;
                     while (*counter_ptr == sync);
                     sync = *counter_ptr;
+                    VMAWARE_PREFETCH(counter_ptr, _MM_HINT_T0);
                     while (*counter_ptr == sync);
 
                     r_pre = *counter_ptr;
@@ -6734,6 +6774,7 @@ public:
                     sync = *counter_ptr;
                     while (*counter_ptr == sync);
                     sync = *counter_ptr;
+                    VMAWARE_PREFETCH(counter_ptr, _MM_HINT_T0);
                     while (*counter_ptr == sync);
 
                     v_pre = *counter_ptr;
@@ -6805,7 +6846,7 @@ public:
                     r_pre = *nested_counter_ptr;
                     std::atomic_signal_fence(std::memory_order_acq_rel);
                     {
-                        for (int i = 0; i < 2256; i++) {
+                        for (size_t j = 0; j < 2256; j++) {
                             nt_query_system_time(&system_time); /* one of the fastest syscalls */
                         }
                     }
@@ -8367,6 +8408,7 @@ public:
                 size_t remaining_bytes = buffer_len;
 
                 while (remaining_bytes >= pattern_len) {
+                    VMAWARE_PREFETCH(search_ptr + 64, _MM_HINT_T0);
                     const void* match = memchr(search_ptr, first_byte, remaining_bytes);
                     if (!match) return false;
                     const u8* match_ptr = static_cast<const u8*>(match);
@@ -8995,6 +9037,7 @@ public:
                             buf[needed_wchars + 1] = L'\0';
 
                             for (wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+                                VMAWARE_PREFETCH(p + 32, _MM_HINT_T0);
                                 scan_text_ids(p);
                             }
                         }
@@ -11128,6 +11171,8 @@ public:
             const wchar_t* buf_end = ptr + (total_wchars ? total_wchars : 0);
 
             for (const wchar_t* p = ptr; p < buf_end && *p; p += (wcslen(p) + 1)) {
+                VMAWARE_PREFETCH(p + 32, _MM_HINT_T0);
+
                 if (wcsstr(p, L"ACPI(DRAC)")) {
                     debug("ACPI_SIGNATURE: QEMU virtual DRAM Controller (DRAC) ACPI node detected");
                     SetupDiDestroyDeviceInfoList(handle_dev_info);
@@ -12093,14 +12138,11 @@ public:
 
         /* Need to do a lambda wrapper to isolate SEH from the parent function's stack unwinding */
         struct aes_executor {
-            #if (CLANG || GCC)
-                __attribute__((__target__("aes")))
-            #endif
-            static bool check_aes_integrity(const unsigned char* pt, const unsigned char* k, unsigned char* o, const bool support) {
+                #if (CLANG || GCC)
+                    __attribute__((__target__("aes")))
+                #endif
+                static bool VMAWARE_VECTORCALL check_aes_integrity(__m128i block, __m128i key_vec, unsigned char* o, const bool support) {
                 __try {
-                    __m128i block = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pt));
-                    __m128i key_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(k));
-
                     __m128i tmp = _mm_xor_si128(block, key_vec);
                     tmp = _mm_aesenc_si128(tmp, key_vec);
 
@@ -12114,7 +12156,8 @@ public:
                 __except (GetExceptionCode() == EXCEPTION_ILLEGAL_INSTRUCTION
                     ? EXCEPTION_EXECUTE_HANDLER
                     : EXCEPTION_CONTINUE_SEARCH
-                ) {
+                    ) 
+                {
                     if (support) {
                         debug("CPU_HEURISTIC: Hypervisor reports AES, but it is not handled correctly");
                         return true;
@@ -12124,7 +12167,10 @@ public:
             }
         };
 
-        if (aes_executor::check_aes_integrity(plaintext, key, out, aes_support)) return true;
+        __m128i block_val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(plaintext));
+        __m128i key_val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(key));
+
+        if (aes_executor::check_aes_integrity(block_val, key_val, out, aes_support)) return true;
 
         /* Detect spoofed AVX state */
     #if defined(__GNUC__) || defined(__clang__)
@@ -12646,21 +12692,23 @@ public:
         const motherboard_vendor vendor = detect_motherboard();
 
         switch (vendor) {
-        case motherboard_vendor::Intel:
-            if (claimed_amd && !claimed_intel) {
-                debug("CPU_HEURISTIC: CPU reports AMD but chipset looks Intel");
-                spoofed = true;
-            }
-            break;
-        case motherboard_vendor::AMD:
-            if (claimed_intel && !claimed_amd) {
-                debug("CPU_HEURISTIC: CPU reports Intel but chipset looks AMD");
-                spoofed = true;
-            }
-            break;
-        case motherboard_vendor::Unknown:
-            debug("CPU_HEURISTIC: Could not determine chipset vendor");
-            break;
+            case motherboard_vendor::Intel:
+                if (claimed_amd && !claimed_intel) {
+                    debug("CPU_HEURISTIC: CPU reports AMD but chipset looks Intel");
+                    spoofed = true;
+                }
+                break;
+            case motherboard_vendor::AMD:
+                if (claimed_intel && !claimed_amd) {
+                    debug("CPU_HEURISTIC: CPU reports Intel but chipset looks AMD");
+                    spoofed = true;
+                }
+                break;
+            case motherboard_vendor::Unknown:
+                debug("CPU_HEURISTIC: Could not determine chipset vendor");
+                break;
+            default:
+                VMAWARE_ASSUME(0);
         }
     #endif
         return spoofed;
@@ -12815,7 +12863,7 @@ public:
         constexpr u32 random_msr = 0xDEADBEEFu;
 
         auto try_read = [](u32 msr_index) noexcept -> bool {
-        #if (MSVC)
+        #if (MSVC && !CLANG)
             unsigned __int64 value = 0;
             __try {
                 value = __readmsr(static_cast<unsigned long>(msr_index));
@@ -12857,8 +12905,56 @@ public:
         #endif
         };
 
+        auto try_write = [](u32 msr_index, unsigned __int64 value) noexcept -> bool {
+        #if (MSVC && !CLANG)
+            __try {
+                __writemsr(static_cast<unsigned long>(msr_index), value);
+                return true;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+        #elif (GCC || CLANG)
+            static thread_local bool g_msr_write_faulted = false;
+            g_msr_write_faulted = false;
+
+            auto veh_handler = [](PEXCEPTION_POINTERS info) noexcept -> LONG {
+                if (info->ExceptionRecord->ExceptionCode == EXCEPTION_PRIV_INSTRUCTION) {
+                    g_msr_write_faulted = true;
+                    /* Skip the 'wrmsr' instruction (2 bytes: 0F 30) */
+                #if (x86_64)
+                    info->ContextRecord->Rip += 2;
+                #else
+                    info->ContextRecord->Eip += 2;
+                #endif
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+                return EXCEPTION_CONTINUE_SEARCH;
+            };
+
+            const PVOID handle = AddVectoredExceptionHandler(1, veh_handler);
+
+            u32 low = static_cast<u32>(value & 0xFFFFFFFF);
+            u32 high = static_cast<u32>(value >> 32);
+            asm volatile (
+                "wrmsr"
+                :
+            : "c"(msr_index), "a"(low), "d"(high)
+            );
+
+            RemoveVectoredExceptionHandler(handle);
+
+            return !g_msr_write_faulted;
+        #endif
+        };
+
         if (try_read(random_msr)) {
-            debug("MSR: Detected hypervisor not correctly handling #GP");
+            debug("MSR: Detected hypervisor not correctly handling #GP on read");
+            return true;
+        }
+
+        if (try_write(random_msr, 0ULL)) {
+            debug("MSR: Detected hypervisor not correctly handling #GP on write");
             return true;
         }
 
@@ -13009,6 +13105,7 @@ public:
                     }
 
                     for (size_t j = 0; j < size - 1; ++j) {
+                        VMAWARE_PREFETCH(&ptr[j + 64], _MM_HINT_T0);
                         if (ptr[j] == 0xCC && ptr[j + 1] == 0xCC) {
                             /*
                              * By returning ptr[j + 1], executing it will safely run 0xC3 (after overwrite)
@@ -13536,11 +13633,11 @@ public:
                 return false;
             }
 
-            const u8* pBuffer = log_data.data();
+            const u8* p_buffer = log_data.data();
             const size_t total_size = log_data.size();
 
             /* Validate Spec ID Event header (legacy format) */
-            const TCG_PCR_EVENT_HEADER first_hdr = read_hdr(pBuffer);
+            const TCG_PCR_EVENT_HEADER first_hdr = read_hdr(p_buffer);
             if (first_hdr.pcrIndex != 0 || first_hdr.eventType != 0x00000003 /* EV_NO_ACTION */) {
                 return false;
             }
@@ -13550,7 +13647,7 @@ public:
                 return false;
             }
 
-            const u8* spec_id_payload = pBuffer + first_event_data_offset;
+            const u8* spec_id_payload = p_buffer + first_event_data_offset;
             const u32 spec_id_size = first_hdr.eventSize;
 
             if (spec_id_size < 28 || memcmp(spec_id_payload, "Spec ID Event03", 15) != 0) {
@@ -13590,24 +13687,25 @@ public:
                     break;
                 }
 
-                const u8* event_ptr = pBuffer + current_offset;
+                const u8* event_ptr = p_buffer + current_offset;
+                VMAWARE_PREFETCH(event_ptr + 128, _MM_HINT_T0);
 
-                const u32 pcrIndex = read_u32(event_ptr);
-                const u32 eventType = read_u32(event_ptr + 4);
-                const u32 digestCount = read_u32(event_ptr + 8);
+                const u32 pcr_index = read_u32(event_ptr);
+                const u32 event_type = read_u32(event_ptr + 4);
+                const u32 digest_count = read_u32(event_ptr + 8);
 
                 size_t local_offset = 12;
 
                 bool parse_error = false;
-                for (u32 i = 0; i < digestCount; ++i) {
+                for (u32 i = 0; i < digest_count; ++i) {
                     if (total_size - (current_offset + local_offset) < 2) {
                         parse_error = true;
                         break;
                     }
-                    const u16 algId = read_u16(event_ptr + local_offset);
+                    const u16 algorithm_id = read_u16(event_ptr + local_offset);
                     local_offset += 2;
 
-                    const u16 digest_size = get_digest_size(algId);
+                    const u16 digest_size = get_digest_size(algorithm_id);
                     if (digest_size == 0) {
                         parse_error = true;
                         break;
@@ -13627,17 +13725,17 @@ public:
                 if (total_size - (current_offset + local_offset) < 4) {
                     break;
                 }
-                const u32 eventSize = read_u32(event_ptr + local_offset);
+                const u32 event_size = read_u32(event_ptr + local_offset);
                 local_offset += 4;
 
-                if (total_size - (current_offset + local_offset) < eventSize) {
+                if (total_size - (current_offset + local_offset) < event_size) {
                     break;
                 }
 
                 const u8* payload = event_ptr + local_offset;
 
-                if (pcrIndex == 0 && eventType == 0x80000008) {
-                    if (eventSize >= 16) {
+                if (pcr_index == 0 && event_type == 0x80000008) {
+                    if (event_size >= 16) {
                         const u64 base_addr = read_u64(payload);
                         const u64 blob_len = read_u64(payload + 8);
 
@@ -13649,14 +13747,14 @@ public:
                     }
                 }
 
-                current_offset += local_offset + eventSize;
+                current_offset += local_offset + event_size;
             }
 
             return false;
         };
 
-        const HMODULE hTbs = LoadLibraryW(L"tbs.dll");
-        if (hTbs == nullptr) {
+        const HMODULE tbs = LoadLibraryW(L"tbs.dll");
+        if (tbs == nullptr) {
             return false;
         }
 
@@ -13668,23 +13766,23 @@ public:
         };
         void* functions[ARRAYSIZE(function_names)] = {};
 
-        memory::get_function_address(hTbs, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function_address(tbs, function_names, functions, ARRAYSIZE(function_names));
 
-        tbsi_get_tcg_log_ex_fn pTbsi_Get_TCG_Log_Ex = reinterpret_cast<tbsi_get_tcg_log_ex_fn>(functions[0]);
-        tbsi_context_create_fn pTbsi_Context_Create = reinterpret_cast<tbsi_context_create_fn>(functions[1]);
-        tbsip_context_close_fn pTbsip_Context_Close = reinterpret_cast<tbsip_context_close_fn>(functions[2]);
-        tbsi_get_tcg_log_fn    pTbsi_Get_TCG_Log = reinterpret_cast<tbsi_get_tcg_log_fn>(functions[3]);
+        tbsi_get_tcg_log_ex_fn tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_fn>(functions[0]);
+        tbsi_context_create_fn tbsi_context_create = reinterpret_cast<tbsi_context_create_fn>(functions[1]);
+        tbsip_context_close_fn tbsip_context_close = reinterpret_cast<tbsip_context_close_fn>(functions[2]);
+        tbsi_get_tcg_log_fn    tbsi_get_tcg_log = reinterpret_cast<tbsi_get_tcg_log_fn>(functions[3]);
 
         bool vm_detected = false;
 
-        if (pTbsi_Get_TCG_Log_Ex) {
-            for (UINT32 logType : { 0, 2 }) {
-                UINT32 logSize = 0;
-                TBS_RESULT res = pTbsi_Get_TCG_Log_Ex(logType, nullptr, &logSize);
-                if ((res == 0 || res == static_cast<TBS_RESULT>(TBS_E_INSUFFICIENT_BUFFER)) && logSize > 0) {
-                    std::vector<u8> buffer(logSize);
-                    if (pTbsi_Get_TCG_Log_Ex(logType, buffer.data(), &logSize) == 0) {
-                        buffer.resize(logSize);
+        if (tbsi_get_tcg_log_ex) {
+            for (UINT32 log_type : { 0, 2 }) {
+                UINT32 log_size = 0;
+                TBS_RESULT res = tbsi_get_tcg_log_ex(log_type, nullptr, &log_size);
+                if ((res == 0 || res == static_cast<TBS_RESULT>(TBS_E_INSUFFICIENT_BUFFER)) && log_size > 0) {
+                    std::vector<u8> buffer(log_size);
+                    if (tbsi_get_tcg_log_ex(log_type, buffer.data(), &log_size) == 0) {
+                        buffer.resize(log_size);
                         if (parse_log(buffer)) {
                             vm_detected = true;
                             break;
@@ -13693,26 +13791,26 @@ public:
                 }
             }
         }
-        else if (pTbsi_Context_Create && pTbsip_Context_Close && pTbsi_Get_TCG_Log) {
+        else if (tbsi_context_create && tbsip_context_close && tbsi_get_tcg_log) {
             VMAWARE_TBS_CONTEXT_PARAMS params{ 1 };
-            TBS_HCONTEXT hContext = nullptr;
-            if (pTbsi_Context_Create(&params, &hContext) == 0) {
-                UINT32 logSize = 0;
-                TBS_RESULT res = pTbsi_Get_TCG_Log(hContext, nullptr, &logSize);
-                if ((res == 0 || res == static_cast<TBS_RESULT>(TBS_E_INSUFFICIENT_BUFFER)) && logSize > 0) {
-                    std::vector<u8> buffer(logSize);
-                    if (pTbsi_Get_TCG_Log(hContext, buffer.data(), &logSize) == 0) {
-                        buffer.resize(logSize);
+            TBS_HCONTEXT context_handle = nullptr;
+            if (tbsi_context_create(&params, &context_handle) == 0) {
+                UINT32 log_size = 0;
+                TBS_RESULT res = tbsi_get_tcg_log(context_handle, nullptr, &log_size);
+                if ((res == 0 || res == static_cast<TBS_RESULT>(TBS_E_INSUFFICIENT_BUFFER)) && log_size > 0) {
+                    std::vector<u8> buffer(log_size);
+                    if (tbsi_get_tcg_log(context_handle, buffer.data(), &log_size) == 0) {
+                        buffer.resize(log_size);
                         if (parse_log(buffer)) {
                             vm_detected = true;
                         }
                     }
                 }
-                pTbsip_Context_Close(hContext);
+                tbsip_context_close(context_handle);
             }
         }
 
-        FreeLibrary(hTbs);
+        FreeLibrary(tbs);
         return vm_detected;
     }
 
@@ -14319,24 +14417,25 @@ public:
         static brand_enum last_detected_brand;
         static u8 last_detected_score;
 
-        /* 1. one brand, custom score */
-        static bool add(const brand_enum p_brand, u8 score) noexcept {
+        /* 1. One brand, custom score */
+        static bool add(const brand_enum p_brand, const u8 score) noexcept {
             return add_score(p_brand, brand_enum::NULL_BRAND, score);
         }
 
-        /* 2. one brand, default score */
+        /* 2. One brand, default score */
         static bool add(const brand_enum p_brand) noexcept {
             return add_score(p_brand, brand_enum::NULL_BRAND, 0);
         }
 
-        /* 3. two brands, default score */
+        /* 3. Two brands, default score */
         static bool add(const brand_enum p_brand, const brand_enum extra_brand) noexcept {
             return add_score(p_brand, extra_brand, 0);
         }
 
-        static bool add_score(const brand_enum p_brand, const brand_enum extra_brand, u8 score) noexcept {
+        static bool add_score(const brand_enum p_brand, const brand_enum extra_brand, const u8 score) noexcept {
             last_detected_brand = p_brand;
-            last_detected_score = score; /* store for the engine to read */
+            last_detected_score = score; /* Store for the engine to read */
+            VMAWARE_ASSUME(p_brand <= brand_enum::NULL_BRAND); /* If we maintain the invariant that the parameters are always valid brand_enum values */
 
             const u8 p_idx = static_cast<u8>(p_brand);
             if (p_idx < MAX_BRANDS) {
@@ -14406,11 +14505,9 @@ public:
 
             const u16 threshold_points = core::is_enabled(flags, HIGH_THRESHOLD) ? high_threshold_score : threshold_score;
 
-            const size_t tech_limit = technique_table.size();
+            const size_t tech_limit = technique_table.size(); /* (enum_size + 1) */
             for (size_t i = technique_begin; i < technique_end; ++i) {
-                if (i >= tech_limit) {
-                    continue;
-                }
+                VMAWARE_ASSUME(i < tech_limit);
 
                 const enum_flags technique_macro = static_cast<enum_flags>(i);
                 const technique& technique_data = technique_table[i];
@@ -14733,6 +14830,7 @@ public:
             return false;
         }
 
+        /* VMAWARE_ASSUME(flag_bit < core::technique_table.size()); */
         const core::technique& pair = core::technique_table.at(flag_bit);
 
         if (auto run_fn = pair.run) {
@@ -14752,7 +14850,7 @@ public:
         }
 
         throw_error("Flag is not known or not implemented");
-        return false; /* useless but avoids compiler warnings */
+        return false; /* Useless but avoids compiler warnings */
     }
 
 
@@ -14763,7 +14861,7 @@ public:
      * @link https://github.com/NotRequiem/VMAware/blob/main/docs/documentation.md#vmbrand
      */
     template <typename ...Args>
-    static std::string brand(Args ...args) {
+    static std::string brand(const Args ...args) {
         const flagset flags = core::arg_handler(args...);
         return brand(flags);
     }
@@ -14795,7 +14893,7 @@ public:
      * @link https://github.com/NotRequiem/VMAware/blob/main/docs/documentation.md#vmdetect
      */
     template <typename ...Args>
-    static bool detect(Args ...args) {
+    static bool detect(const Args ...args) {
         /* Fetch all the flags in a std::bitset */
         const flagset flags = core::arg_handler(args...);
         return detect(flags);
@@ -14840,7 +14938,7 @@ public:
      * @link https://github.com/NotRequiem/VMAware/blob/main/docs/documentation.md#vmpercentage
      */
     template <typename ...Args>
-    static u8 percentage(Args ...args) {
+    static u8 percentage(const Args ...args) {
         /* Fetch all the flags in a std::bitset */
         const flagset flags = core::arg_handler(args...);
         return percentage(flags);
@@ -14936,7 +15034,7 @@ public:
      * @return flagset
      */
     template <typename ...Args>
-    static enum_flags DISABLE(Args ...args) {
+    static enum_flags DISABLE(const Args ...args) {
         /*
          * Basically core::arg_handler but in reverse,
          * it'll clear the bits of the provided flags
@@ -15053,7 +15151,7 @@ public:
      * @return VM::enum_vector
      */
     template <typename ...Args>
-    static std::vector<enum_flags> detected_enums(Args ...args) {
+    static std::vector<enum_flags> detected_enums(const Args ...args) {
         const flagset flags = core::arg_handler(args...);
         return detected_enums(flags);
     }
@@ -15093,7 +15191,7 @@ public:
      * @return std::uint8_t
      */
     template <typename ...Args>
-    static u8 detected_count(Args ...args) {
+    static u8 detected_count(const Args ...args) {
         const flagset flags = core::arg_handler(args...);
         return detected_count(flags);
     }
@@ -15117,7 +15215,7 @@ public:
      * @return std::string
      */
     template <typename ...Args>
-    static std::string type(Args ...args) {
+    static std::string type(const Args ...args) {
         const flagset flags = core::arg_handler(args...);
         return type(flags);
     }
@@ -15225,7 +15323,7 @@ public:
       * @return std::string
       */
     template <typename ...Args>
-    static std::string conclusion(Args ...args) {
+    static std::string conclusion(const Args ...args) {
         const flagset flags = core::arg_handler(args...);
         return conclusion(flags);
     }
@@ -15590,7 +15688,6 @@ static_assert(VM::core::technique_table.size() == VM::enum_size + 1, "technique_
 #undef ARM64
 #undef ARM32
 #undef ARM
-#undef SOURCE_LOCATION_SUPPORTED
 #undef GCC
 #undef CLANG
 #undef debug
