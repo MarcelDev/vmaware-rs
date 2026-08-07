@@ -674,7 +674,7 @@ public:
         EIP_OVERFLOW,
         SVM_EXCEPTIONS,
         MEASURED_BOOT,
-        TPM_PASSTHROUGH, 
+        TPM, 
 
         /* Linux and Windows */
         SYSTEM_REGISTERS,
@@ -6520,6 +6520,7 @@ public:
             ntdll_dll = memory::get_ntdll();
 
             if (!winhv_dll || !ntdll_dll) {
+                debug("TIMER: Not all modules required to run the nested check could be found");
                 check_nested_hypervisors = false;
             }
             else {
@@ -6562,6 +6563,7 @@ public:
                     !whv_run_virtual_processor || !whv_delete_partition || !nt_allocate_virtual_memory ||
                     !nt_free_virtual_memory || !nt_query_system_time)
                 {
+                    debug("TIMER: Not all required functions to run the nested hypervisor check could be found");
                     if (winhv_dll) FreeLibrary(winhv_dll);
                     winhv_dll = nullptr;
                     check_nested_hypervisors = false;
@@ -13816,11 +13818,11 @@ public:
 
 
     /**
-     * @brief Check whether a TPM has been passed through to a VM
+     * @brief Check whether a TPM is virtual or has been passed through to a VM
      * @category Windows
-     * @implements VM::TPM_PASSTHROUGH
+     * @implements VM::TPM
      */
-    [[nodiscard]] static bool tpm_passthrough() {
+    [[nodiscard]] static bool tpm() {
     #pragma pack(push, 1)
         struct tcg_pcr_event_header {
             u32 pcr_index;
@@ -13912,6 +13914,14 @@ public:
         using tbsi_get_tcg_log_ex_t = TBS_RESULT(__stdcall*)(u32, u8*, u32*);
         using tbsip_submit_command_t = TBS_RESULT(__stdcall*)(TBS_HCONTEXT, u32, u32, const u8*, u32, u8*, u32*);
         using tbsip_context_close_t = TBS_RESULT(__stdcall*)(TBS_HCONTEXT);
+
+        static const char* default_algorithms_profile =
+            "rsa,rsa-min-size=1024,tdes,tdes-min-size=128,sha1,hmac,"
+            "aes,aes-min-size=128,mgf1,keyedhash,xor,sha256,sha384,sha512,"
+            "null,rsassa,rsaes,rsapss,oaep,ecdsa,ecdh,ecdaa,sm2,ecschnorr,ecmqv,"
+            "kdf1-sp800-56a,kdf2,kdf1-sp800-108,ecc,ecc-min-size=192,ecc-nist,"
+            "ecc-bn,ecc-sm2-p256,symcipher,camellia,camellia-min-size=128,cmac,"
+            "ctr,ofb,cbc,cfb,ecb";
 
         auto read_u16 = [](const u8* const ptr) noexcept -> u16 {
             u16 val;
@@ -14155,6 +14165,160 @@ public:
             return false;
         }
 
+        /* Analyze TPM algorithms 
+        */
+        auto trim = [](std::string s) {
+            auto ws = [](unsigned char c) { 
+                return std::isspace(c) != 0;
+            };
+            s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), ws));
+            s.erase(std::find_if_not(s.rbegin(), s.rend(), ws).base(), s.end());
+            return s;
+        };
+
+        struct alg_name_id {
+            const char* name;
+            u16 id;
+        };
+
+        static const alg_name_id alg_map[] = {
+            {"rsa", 0x0001}, {"tdes", 0x0003}, {"sha1", 0x0004}, {"hmac", 0x0005},
+            {"aes", 0x0006}, {"mgf1", 0x0007}, {"keyedhash", 0x0008}, {"xor", 0x000A},
+            {"sha256", 0x000B}, {"sha384", 0x000C}, {"sha512", 0x000D}, {"null", 0x0010},
+            {"rsassa", 0x0014}, {"rsaes", 0x0015}, {"rsapss", 0x0016}, {"oaep", 0x0017},
+            {"ecdsa", 0x0018}, {"ecdh", 0x0019}, {"ecdaa", 0x001A}, {"sm2", 0x001B},
+            {"ecschnorr", 0x001C}, {"ecmqv", 0x001D}, {"kdf1-sp800-56a", 0x0020},
+            {"kdf2", 0x0021}, {"kdf1-sp800-108", 0x0022}, {"ecc", 0x0023},
+            {"symcipher", 0x0025}, {"camellia", 0x0026}, {"cmac", 0x003F},
+            {"ctr", 0x0040}, {"ofb", 0x0041}, {"cbc", 0x0042}, {"cfb", 0x0043},
+            {"ecb", 0x0044}
+        };
+
+        auto name_to_alg = [](const std::string& s, u16* out) noexcept -> bool {
+            for (u32 i = 0; i < sizeof(alg_map) / sizeof(alg_map[0]); ++i) {
+                if (s == alg_map[i].name) {
+                    *out = alg_map[i].id;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto has_id = [](const u16* list, u32 count, u16 id) noexcept -> bool {
+            for (u32 i = 0; i < count; ++i) {
+                if (list[i] == id) return true;
+            }
+            return false;
+        };
+
+        auto add_id = [&](u16* list, u32& count, u16 id) noexcept -> bool {
+            if (has_id(list, count, id)) return true;
+            if (count >= 64) return false;
+            list[count++] = id;
+            return true;
+        };
+
+        u16 expected_algos[64] = {};
+        u32 expected_alg_count = 0;
+        u16 actual_algos[64] = {};
+        u32 actual_alg_count = 0;
+
+        std::stringstream ss(default_algorithms_profile);
+        std::string t;
+
+        while (std::getline(ss, t, ',')) {
+            t = trim(t);
+            if (t.empty() || t.find('=') != std::string::npos) {
+                continue;
+            }
+
+            if (t == "ecc-nist" || t == "ecc-bn" || t == "ecc-sm2-p256" ||
+                t == "ctr" || t == "ofb" || t == "cbc" || t == "cfb" || t == "ecb") {
+                continue;
+            }
+
+            u16 id = 0;
+            if (!name_to_alg(t, &id) || !add_id(expected_algos, expected_alg_count, id)) {
+                free_resources();
+                return false;
+            }
+        }       
+
+        auto be16 = [](const u8* p) -> u16 {
+            return static_cast<u16>((static_cast<u16>(p[0]) << 8) | p[1]);
+        };
+
+        auto be32 = [](const u8* p) -> u32 {
+            return (static_cast<u32>(p[0]) << 24) |
+                (static_cast<u32>(p[1]) << 16) |
+                (static_cast<u32>(p[2]) << 8) |
+                static_cast<u32>(p[3]);
+        };
+
+        u8 cmd_alg[22] = {
+            0x80, 0x01,
+            0x00, 0x00, 0x00, 0x16,
+            0x00, 0x00, 0x01, 0x7A,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xFF, 0xFF
+        };
+
+        u8 rsp_alg[4096] = {};
+        u32 rsp_alg_size = sizeof(rsp_alg);
+
+        const TBS_RESULT hr_alg = p_tbsip_submit_command(h_tbs_context, 0, 200, cmd_alg, sizeof(cmd_alg), rsp_alg, &rsp_alg_size);
+
+        if (hr_alg != 0 || rsp_alg_size < 19) {
+            free_resources();
+            return false;
+        }
+
+        const u32 alg_rc = be32(rsp_alg + 6);
+        const u8 alg_more = rsp_alg[10];
+        const u32 alg_cap = be32(rsp_alg + 11);
+        const u32 alg_count = be32(rsp_alg + 15);
+
+        if (alg_rc != 0 || alg_more != 0 || alg_cap != 0x00000000) {
+            free_resources();
+            return false;
+        }
+
+        u32 off = 19;
+        for (u32 i = 0; i < alg_count; ++i) {
+            if (off + 6 > rsp_alg_size) {
+                free_resources();
+                return false;
+            }
+
+            const u16 alg_id = be16(rsp_alg + off);
+            off += 6;
+
+            if (!add_id(actual_algos, actual_alg_count, alg_id)) {
+                free_resources();
+                return false;
+            }
+        }
+
+        bool alg_mismatch = (expected_alg_count != actual_alg_count);
+
+        for (u32 i = 0; !alg_mismatch && i < expected_alg_count; ++i) {
+            if (!has_id(actual_algos, actual_alg_count, expected_algos[i])) {
+                alg_mismatch = true;
+            }
+        }
+
+        for (u32 i = 0; !alg_mismatch && i < actual_alg_count; ++i) {
+            if (!has_id(expected_algos, expected_alg_count, actual_algos[i])) {
+                alg_mismatch = true;
+            }
+        }
+
+        if (!alg_mismatch) {
+            debug("TPM: libtpm detected");
+            return true;
+        }
+
         /* Get raw log size and allocate log buffer */
         u32 log_size = 0;
         const TBS_RESULT hr_log_sz = p_tbsi_get_tcg_log_ex(0, nullptr, &log_size);
@@ -14346,7 +14510,7 @@ public:
             if (read_tpm_pcr(h_tbs_context, pcr_idx, 0x000B, actual_pcr, &actual_pcr_size)) {
                 if (actual_pcr_size != 32 || memcmp(actual_pcr, reconstructed_pcrs[pcr_idx], 32) != 0) {
                     if (pcr_idx != 0 && pcr_idx != 6) {
-                        debug("TPM_PASSTHROUGH: Detected mismatch on hardware PCR ", pcr_idx);
+                        debug("TPM: Detected mismatch on hardware PCR ", pcr_idx);
                         passthrough_detected = true;
                     }
                 }
@@ -15132,7 +15296,7 @@ public:
             case SVM_EXCEPTIONS: return "SVM_EXCEPTIONS";
             case CGROUP: return "CGROUP";
             case MEASURED_BOOT: return "MEASURED_BOOT";
-            case TPM_PASSTHROUGH: return "TPM_PASSTHROUGH";
+            case TPM: return "TPM";
             /* END OF TECHNIQUE LIST */
             case DEFAULT: return "DEFAULT"; 
             case ALL: return "ALL"; 
@@ -15576,7 +15740,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::EIP_OVERFLOW, {150, VM::eip_overflow}},
             {VM::HYPERVISOR_HOOK, {150, VM::hypervisor_hook}},
             {VM::SINGLE_STEP, {150, VM::single_step}},
-            {VM::TPM_PASSTHROUGH, {45, VM::tpm_passthrough}},
+            {VM::TPM, {45, VM::tpm}},
             {VM::NVRAM, {100, VM::nvram}},
             {VM::CPU_HEURISTIC, {90, VM::cpu_heuristic}},
             {VM::ACPI_SIGNATURE, {100, VM::acpi_signature}},
