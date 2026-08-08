@@ -53,7 +53,7 @@
  *     if (VM::detect()) {
  *         std::cout << "Virtual machine detected!" << "\n";
  *     } else {
- *         std::cout << "Running on baremetal" << "\n";
+ *         std::cout << "Running on bare metal" << "\n";
  *     }
  * 
  *     std::cout << "VM name: " << VM::brand() << "\n";
@@ -531,7 +531,7 @@
             0x9D,                                      /* 13: popfq/popfd */
             0x8E, 0xD0,                                /* 14: mov ss, ax  <- shadow starts here */
             0x0F, 0xA2,                                /* 16: cpuid       <- buggy hypervisor traps here */
-            0x5B,                                      /* 18: pop rbx/ebx <- baremetal traps here */
+            0x5B,                                      /* 18: pop rbx/ebx <- bare metal traps here */
             0x90,                                      /* 19: nop */
             0x9C,                                      /* 20: pushfq/pushfd */
             0x81, 0x24, 0x24, 0xFF, 0xFE, 0xFF, 0xFF,  /* 21: and dword ptr [rsp/esp], 0xFFFFFEFF */
@@ -1268,19 +1268,14 @@ public:
             const std::string brand_str = cpu_manufacturer(p_leaf);
 
             if (brand_str == "Microsoft Hv") {
-                const auto hyperx = util::hyper_x();
-
                 /*
                  * A Hyper-V *host* (root partition) is not itself a guest VM, and a QEMU/KVM guest
                  * running with Hyper-V enlightenments is already attributed to QEMU_KVM_HYPERV by
                  * hyper_x(). In neither case should the "Microsoft Hv" vendor string be taken to
                  * mean the guest is genuine Microsoft Hyper-V.
                  */
-                if (hyperx == HYPERV_HOST) {
+                if (util::hyper_x() == HYPERV_HOST) {
                     return false;
-                }
-                if (hyperx == HYPERV_ENLIGHTENMENT) {
-                    return true; /* VM detected via the vendor string; brand already set by hyper_x() */
                 }
                 return core::add(brand_enum::HYPERV);
             }
@@ -5698,9 +5693,9 @@ public:
      * @implements VM::CPU_BRAND
      */
      [[nodiscard]] static bool cpu_brand() {
-    #if (!x86)
+     #if (!x86)
          return false;
-    #else
+     #else
          const char* brand = cpu::get_brand();
 
          if (!brand) {
@@ -5722,8 +5717,7 @@ public:
              { "vbox",       brand_enum::VBOX },
              { "virtualbox", brand_enum::VBOX },
              { "bhyve",      brand_enum::BHYVE },
-             { "parallels",  brand_enum::PARALLELS },
-             { "vmware",     brand_enum::VMWARE },
+             { "parallels",  brand_enum::PARALLELS }
          };
 
          for (const auto& c : checks) {
@@ -5742,12 +5736,12 @@ public:
          }
 
          return false;
-    #endif
+     #endif
      }
 
 
     /**
-     * @brief Check if hypervisor feature bit in CPUID ECX bit 31 is enabled (always false for physical CPUs)
+     * @brief Check if hypervisor feature bit in CPUID ECX bit 31 is enabled
      * @category x86
      * @implements VM::HYPERVISOR_BIT
      */
@@ -5773,7 +5767,7 @@ public:
             return true;
         }
 
-        /* If hypervisor bit is disabled, but vmaware detects hyper-v signals, we're in an impossible situation (patching) */
+        /* If hypervisor bit is disabled, but VMAware detects Hyper-V signals, we're in an impossible situation (patching) */
         if (state == HYPERV_HOST) {
             return true;
         }
@@ -5784,7 +5778,7 @@ public:
 
 
     /**
-     * @brief Check for hypervisor brand string length (would be around 2 characters in a host machine)
+     * @brief Check for hypervisor brand string length
      * @category x86
      * @implements VM::HYPERVISOR_STR
      */
@@ -6358,8 +6352,8 @@ public:
         u32 edx = 0;
         cpu::cpuid(unused, unused, ecx, edx, cpu::leaf::hv_privileges);
 
-        constexpr u32 ECX_SIG = 0x4D4D5645u; /* 'EVMM' -> 0x4D4D5645 */
-        constexpr u32 EDX_SIG = 0x43544E49u; /* 'INTC' -> 0x43544E49 */
+        constexpr u32 ECX_SIG = 0x4D4D5645u; /* 'EVMM' */
+        constexpr u32 EDX_SIG = 0x43544E49u; /* 'INTC' */
 
         if (ecx == ECX_SIG && edx == EDX_SIG) {
             return core::add(brand_enum::INTEL_KGT);
@@ -6465,23 +6459,6 @@ public:
         }
 
         debug("TIMER: CPU supports SERIALIZE: ", serialize_available);
-        GROUP_AFFINITY old_affinity{};
-        SetThreadGroupAffinity(current_thread, &trigger_affinity, &old_affinity);
-
-        const DWORD old_process_priority = GetPriorityClass(current_process);
-        const int old_thread_priority = GetThreadPriority(current_thread);
-        SetPriorityClass(current_process, ABOVE_NORMAL_PRIORITY_CLASS); /* ABOVE_NORMAL_PRIORITY_CLASS + THREAD_PRIORITY_HIGHEST = 12 base priority */
-        SetThreadPriority(current_thread, THREAD_PRIORITY_HIGHEST);
-        SetThreadPriorityBoost(current_thread, TRUE); /* disable dynamic thread priority adjustments by Windows, not turbo boosts by the hardware itself */
-
-        VMAWARE_CONSTEXPR const u32 ct_seed = timer::config::get_seed();
-        const size_t batch_size = timer::config::generate_batch_size(ct_seed);
-
-        std::vector<timer::timer_tick_t> vm_samples(batch_size), ref_samples(batch_size); /* pre page-fault MMU, we won't warm-up cpuid samples for the P-states intentionally */
-        /* lock the memory for the samples to prevent soft #PF during timing if permissions are enough */
-        const bool vm_samples_locked = VirtualLock(vm_samples.data(), batch_size * sizeof(timer::timer_tick_t)); 
-        const bool ref_samples_locked = VirtualLock(ref_samples.data(), batch_size * sizeof(timer::timer_tick_t));
-
     #if (x86_64) /* WHP stuff not available for x86_32 */
         using whv_create_partition_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE*);
         using whv_set_partition_property_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY_CODE, const void*, UINT32);
@@ -6507,11 +6484,11 @@ public:
         nt_free_virtual_memory_fn nt_free_virtual_memory = nullptr;
         nt_query_system_time_fn nt_query_system_time = nullptr;
 
+        const UINT32 reg_count = 12;
+        PVOID mem = nullptr;
         HMODULE winhv_dll = nullptr;
         HMODULE ntdll_dll = nullptr;
-        WHV_PARTITION_HANDLE p{};
-        PVOID mem = nullptr;
-        const UINT32 reg_count = 12;
+        WHV_PARTITION_HANDLE p = nullptr;
         WHV_REGISTER_NAME names[reg_count]{};
         WHV_REGISTER_VALUE values[reg_count]{};
 
@@ -6563,28 +6540,43 @@ public:
                     !whv_run_virtual_processor || !whv_delete_partition || !nt_allocate_virtual_memory ||
                     !nt_free_virtual_memory || !nt_query_system_time)
                 {
-                    debug("TIMER: Not all required functions to run the nested hypervisor check could be found");
                     if (winhv_dll) FreeLibrary(winhv_dll);
                     winhv_dll = nullptr;
+                    debug("TIMER: Not all modules required to run the nested check could be found");
                     check_nested_hypervisors = false;
                 }
             }
 
             bool partition_ready = false;
             if (whv_create_partition && SUCCEEDED(whv_create_partition(&p))) {
+
                 UINT32 cpu_count = 1;
+                HRESULT hr = S_OK;
                 if (whv_set_partition_property) {
-                    whv_set_partition_property(p, WHvPartitionPropertyCodeProcessorCount, &cpu_count, sizeof(cpu_count));
+                    hr = whv_set_partition_property(p, WHvPartitionPropertyCodeProcessorCount, &cpu_count, sizeof(cpu_count));
                 }
-                if (whv_setup_partition && SUCCEEDED(whv_setup_partition(p))) {
+
+                if (SUCCEEDED(hr) && whv_setup_partition && SUCCEEDED(whv_setup_partition(p))) {
                     if (whv_create_virtual_processor && SUCCEEDED(whv_create_virtual_processor(p, 0, 0))) {
-                        SIZE_T region_size = 0x2000;
+
+                        mem = nullptr;
+                        SIZE_T region_size = 0x2000; 
                         NTSTATUS status = static_cast<NTSTATUS>(0xC0000001L);
+
                         if (nt_allocate_virtual_memory) {
-                            status = nt_allocate_virtual_memory(current_process, &mem, 0, &region_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                            status = nt_allocate_virtual_memory(
+                                current_process,
+                                &mem,
+                                0,
+                                &region_size,
+                                MEM_RESERVE | MEM_COMMIT,
+                                PAGE_READWRITE
+                            );
                         }
+
                         if (NT_SUCCESS(status)) {
-                            if (whv_map_gpa_range && SUCCEEDED(whv_map_gpa_range(p, mem, 0, 0x2000, static_cast<WHV_MAP_GPA_RANGE_FLAGS>(7)))) {
+                            constexpr auto flags = static_cast<WHV_MAP_GPA_RANGE_FLAGS>(7); /* Flags 7 = Read | Write | Execute) */
+                            if (whv_map_gpa_range && SUCCEEDED(whv_map_gpa_range(p, mem, 0, 0x2000, flags))) {
                                 partition_ready = true;
                             }
                             else {
@@ -6666,6 +6658,23 @@ public:
             }
         }
     #endif  
+
+        GROUP_AFFINITY old_affinity{};
+        SetThreadGroupAffinity(current_thread, &trigger_affinity, &old_affinity);
+
+        const DWORD old_process_priority = GetPriorityClass(current_process);
+        const int old_thread_priority = GetThreadPriority(current_thread);
+        SetPriorityClass(current_process, ABOVE_NORMAL_PRIORITY_CLASS); /* ABOVE_NORMAL_PRIORITY_CLASS + THREAD_PRIORITY_HIGHEST = 12 base priority */
+        SetThreadPriority(current_thread, THREAD_PRIORITY_HIGHEST);
+        SetThreadPriorityBoost(current_thread, TRUE); /* disable dynamic thread priority adjustments by Windows, not turbo boosts by the hardware itself */
+
+        VMAWARE_CONSTEXPR const u32 ct_seed = timer::config::get_seed();
+        const size_t batch_size = timer::config::generate_batch_size(ct_seed);
+
+        std::vector<timer::timer_tick_t> vm_samples(batch_size), ref_samples(batch_size); /* pre page-fault MMU, we won't warm-up cpuid samples for the P-states intentionally */
+        /* Lock the memory for the samples to prevent soft #PF during timing if permissions are enough */
+        const bool vm_samples_locked = VirtualLock(vm_samples.data(), batch_size * sizeof(timer::timer_tick_t));
+        const bool ref_samples_locked = VirtualLock(ref_samples.data(), batch_size * sizeof(timer::timer_tick_t));
 
         /* Independent multi-trial state initialization */
         constexpr int trials = 5;
@@ -6913,7 +6922,7 @@ public:
 
         /* Analyze instruction latency results and report exactly what VMAware found */
         if (!invalid_measurement) {
-            /* VMM = Time spent in hypervisor and baremetal; nVMM = Time spent in baremetal */
+            /* VMM = Time spent in hypervisor and bare metal; nVMM = Time spent in bare metal */
             const double latency_ratio = best_ref_l ? (double)best_cpuid_l / (double)best_ref_l : 0;
             debug("TIMER: Instruction > VMM -> ", best_cpuid_l, " | nVMM -> ", best_ref_l, " | Ratio -> ", latency_ratio);
 
@@ -8224,6 +8233,7 @@ public:
                     /* Check for the 0xE8 signature (VPC/Hyper-V) in the high byte */
                     if ((idt_base >> 24) == 0xE8) {
                         debug("SIDT: VPC/Hyper-V signature detected on core %u", i);
+                        core::add(brand_enum::VPC, 100);
                         found = true;
                     }
                 }
@@ -8266,10 +8276,10 @@ public:
     [[nodiscard]] static bool azure() noexcept {
         /*
          * Returns 1u if alphanumeric, 0u if not. Here we use unsigned integers
-         * instead of booleans because MSVC's IntelliSense is stupid and avoids warnings
+         * instead of booleans to avoid static analysis warnings
          * about bitwise operations on boolean types
          */
-        auto is_alnum_ascii = [](char c) noexcept -> unsigned int {
+        auto is_alnum_ascii = [](const char c) noexcept -> unsigned int {
             const auto l = static_cast<unsigned char>(c | 0x20);
             const auto d = static_cast<unsigned char>(c);
 
@@ -8471,7 +8481,7 @@ public:
                 if (pattern_len > buffer_len) continue;
 
                 if (find_pattern(pattern, pattern_len)) {
-                    /* Special handling for Xen: must not have PXEN to prevent false flagging some baremetal systems */
+                    /* Special handling for Xen: must not have PXEN to prevent false flagging some bare metal systems */
                     if (strcmp(pattern, "Xen") == 0) {
                         constexpr char pxen[] = "PXEN";
                         constexpr size_t pxen_len = sizeof(pxen) - 1;
@@ -9261,7 +9271,7 @@ public:
          * Helper to detect QEMU instances based on default hard drive serial patterns
          * QEMU drives often start with "QM000" followed by digits
          */
-        auto is_qemu_serial = [](const char* str, size_t len) noexcept -> bool {
+        auto is_qemu_serial = [](const char* str, const size_t len) noexcept -> bool {
             if (!str || len < 6) {
                 return false;
             }
@@ -9276,7 +9286,7 @@ public:
          * Helper to detect VirtualBox instances
          * VirtualBox uses a specific serial format "VB" followed by hex segments
          */
-        auto is_vbox_serial = [](const char* str, size_t len) noexcept -> bool {
+        auto is_vbox_serial = [](const char* str, const size_t len) noexcept -> bool {
             /* Format: VB12345678-12345678 (19 chars) */
             if (len != 19) {
                 return false;
@@ -9289,7 +9299,7 @@ public:
                 return false;
             }
 
-            auto is_hex = [](char c) noexcept -> bool {
+            auto is_hex = [](const char c) noexcept -> bool {
                 const char lower = static_cast<char>(c | 0x20);
                 return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'f');
             };
@@ -9318,7 +9328,7 @@ public:
             #define StorageDeviceProtocolSpecificProperty static_cast<STORAGE_PROPERTY_ID>(50)
         #endif
 
-        auto strnlen = [](const char* s, size_t max) noexcept -> size_t {
+        auto strnlen = [](const char* s, const size_t max) noexcept -> size_t {
             const void* p = memchr(s, 0, max);
             if (!p) return max;
             return static_cast<size_t>(static_cast<const char*>(p) - s);
@@ -9382,7 +9392,7 @@ public:
             } qpacket{};
         #pragma pack(pop)
 
-            auto query_protocol = [&](STORAGE_PROPERTY_ID prop_id, DWORD data_type, DWORD req_val, DWORD req_sub_val, void* out_buf, DWORD out_size) noexcept -> bool {
+            auto query_protocol = [&](const STORAGE_PROPERTY_ID prop_id, const DWORD data_type, const DWORD req_val, const DWORD req_sub_val, void* out_buf, const DWORD out_size) noexcept -> bool {
                 qpacket.query.PropertyId = prop_id;
                 qpacket.query.QueryType = PropertyStandardQuery;
                 qpacket.protocol_data.ProtocolType = ProtocolTypeNvme;
@@ -10077,7 +10087,7 @@ public:
     [[nodiscard]] static bool power_capabilities() {
         const HMODULE ntdll = memory::get_ntdll();
 
-        constexpr const char* function_names[] = { "NtPowerInformation" }; /* Win8 */
+        constexpr const char* function_names[] = { "NtPowerInformation" }; /* Win8 // Windows Server 2012 */
         void* functions[ARRAYSIZE(function_names)] = {};
         memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
@@ -10150,7 +10160,6 @@ public:
         if (!nt_open_key || !nt_query_value_key || !rtl_init_unicode_string || !nt_close) 
             return false;
 
-        /* We use native unicode strings and object attributes to interface directly with the kernel */
         UNICODE_STRING key_name;
         rtl_init_unicode_string(&key_name, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion");
 
@@ -10202,10 +10211,6 @@ public:
             return false;
         }
 
-        /*
-         * Safely extract the ProductId string from the raw byte buffer, ensuring we don't
-         * buffer overflow if the registry returns garbage data
-         */
         const auto* kv = reinterpret_cast<KEY_VALUE_PARTIAL_INFORMATION_LOCAL*>(buffer);
         const ULONG data_length = kv->DataLength;
         if (data_length == 0 || data_length >= sizeof(buffer)) return false;
@@ -10215,7 +10220,7 @@ public:
         memcpy(product_id, kv->Data, copyLen);
         product_id[copyLen] = '\0';
 
-        /* A list of known "dirty" Product IDs associated with public malware analysis sandboxes */
+        /* A list of known Product IDs associated with public malware analysis sandboxes */
         struct target_pattern {
             const char* product_id;
             enum brand_enum brand;
@@ -10228,7 +10233,6 @@ public:
         };
 
         constexpr size_t target_length = 21;
-
         if (strlen(product_id) != target_length) return false;
 
         /*
@@ -10252,12 +10256,11 @@ public:
      * @implements VM::VPC_INVALID
      */
     [[nodiscard]] static bool vpc_invalid() {
+        bool rc = false;
+    #if (x86_32 && !CLANG)
         if (util::is_x86_process_on_arm()) {
             return false;
         }
-
-        bool rc = false;
-    #if (x86_32 && !CLANG)
 
         auto is_inside_vpc = [](PEXCEPTION_POINTERS ep) noexcept -> DWORD {
             PCONTEXT ctx = ep->ContextRecord;
@@ -10308,11 +10311,11 @@ public:
      * @implements VM::VMWARE_STR
      */
     [[nodiscard]] static bool vmware_str() {
+    #if (x86_32)
         if (util::is_x86_process_on_arm()) {
             return false;
         }
 
-    #if (x86_32)
         u16 tr = 0;
         __asm {
             str ax
@@ -10431,7 +10434,8 @@ public:
         void* functions[ARRAYSIZE(function_names)] = {};
         memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
-        using nt_openfile_t = NTSTATUS(__stdcall*)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
+        using nt_openfile_t = 
+            NTSTATUS(__stdcall*)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
             POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock,
             ULONG ShareAccess, ULONG OpenOptions);
         using rtl_init_unicode_string_t = void(__stdcall*)(PUNICODE_STRING DestinationString, PCWSTR SourceString);
@@ -11125,7 +11129,7 @@ public:
         dev_info.cbSize = sizeof(dev_info);
         const DEVPROPKEY key = DEVPKEY_Device_LocationPaths;
 
-        /* Baremetal tokens (case-sensitive to preserve handling against edge-cases) */
+        /* Bare metal tokens (case-sensitive to preserve handling against edge-cases) */
         static constexpr const wchar_t* excluded_tokens[] = {
             L"GFX",
             L"IGD", L"IGFX", L"IGPU",
@@ -11416,7 +11420,7 @@ public:
 
         __try {
             __asm {
-                mov dword ptr[baremetal_target_ip], offset baremetal_target /* get exact baremetal trap target address dynamically */
+                mov dword ptr[baremetal_target_ip], offset baremetal_target /* get exact bare metal trap target address dynamically */
                 push ebx
                 xor eax, eax
                 mov ax, ss
@@ -11426,7 +11430,7 @@ public:
                 mov ss, ax /* this blocks any debug exception for exactly one instruction */
                 cpuid
                 baremetal_target :
-                pop ebx /* baremetal delays the #DB until here due to shadow suppression */
+                pop ebx /* bare metal delays the #DB until here due to shadow suppression */
                     nop
                     pushfd
                     and dword ptr[esp], 0xFFFFFEFF
@@ -11436,7 +11440,7 @@ public:
         __except (exception_handler::evaluate(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
 
         /*
-         * Hypervisor is detected if the trap fired at any IP differing from the expected baremetal target
+         * Hypervisor is detected if the trap fired at any IP differing from the expected bare metal target
          * OR if the single step exception never fired at all (trap_ip == 0)
          */
         return (trap_ip == 0 || trap_ip != baremetal_target_ip);
@@ -11451,7 +11455,7 @@ public:
         __except (exception_handler::evaluate(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
 
         /*
-         * Hypervisor is detected if execution trapped at any offset other than expected baremetal
+         * Hypervisor is detected if execution trapped at any offset other than expected bare metal
          * OR if the single step exception never fired at all (trap_ip == 0)
          */
         return (trap_ip == 0 || trap_ip != baremetal_target_ip);
@@ -12398,7 +12402,7 @@ public:
         if (claimed_amd) {
             cpu::model_struct model = cpu::get_model();
             if (!model.is_ryzen) {
-                debug("CPU_HEURISTIC: CPU is AMD but not Ryzen (Pre-Zen). Skipping CLZERO check");
+                debug("CPU_HEURISTIC: CPU is AMD but not Ryzen. Skipping CLZERO check");
                 proceed = false;
             }
         }
@@ -12495,7 +12499,10 @@ public:
                         volatile u8* p = reinterpret_cast<volatile u8*>(amd_target_mem);
                         memory_all_zero = true;
                         for (SIZE_T i = 0; i < target_size; ++i) {
-                            if (p[i] != 0) { memory_all_zero = false; break; }
+                            if (p[i] != 0) { 
+                                memory_all_zero = false; 
+                                break; 
+                            }
                         }
                     }
 
@@ -12774,8 +12781,7 @@ public:
          * The HPET (PNP0103) timer presence check was removed, more info at: https://github.com/NotRequiem/VMAware/pull/616
          * Here, we check for the PIT/AT timer (PC-class System Timer)
          */
-        const HDEVINFO devs = SetupDiGetClassDevsW(
-            nullptr, nullptr, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+        const HDEVINFO devs = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
 
         if (devs == INVALID_HANDLE_VALUE)
             return false;
@@ -12838,8 +12844,7 @@ public:
                 }
             }
 
-            if (found)
-                break;
+            if (found) break;
         }
 
         free(buffer);
@@ -13543,21 +13548,30 @@ public:
 
         u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
         cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::proc_ext);
-        const bool svmcpuid_visible = ((ecx >> 2) & 1) != 0;
+        const bool svm_visible = ((ecx >> 2) & 1) != 0;
 
         const DWORD exception_status = memory::execute_handler(vmload_stub);
         const bool fault_hit = (exception_status != 0);
 
         if (exception_status == EXCEPTION_ILLEGAL_INSTRUCTION) {
-            return false;
+            return false; /* AMD CPUs only #UD if SVM is not active */
         }
 
-        if (!svmcpuid_visible || !fault_hit) {
+        /* 
+         * If we reach here, it means:
+         * 1. An exception was triggered, since we're executing at CPL3
+         * 2. That exception was not #UD, because the code would have returned in the branch above
+         * 3. EFER.SVME is 1, because the exception was not #UD, so SVM is active
+         * 
+         * If CPUID says SVM is not active (!svm_visible), it contradicts EFER.SVME being 1, it's a red flag
+         * If there was no exception at all (!fault_hit), it contradicts our current CPL3 privilege, it's a red flag
+         */
+        if (!svm_visible || !fault_hit) { /* Hypervisor spoofed call, buggy firmware, or AMD server CPU */
             debug("SVM_EXCEPTIONS: Detected SVM hypervisor hiding CPU capabilities");
             return core::add(brand_enum::NULL_BRAND, 150);
         }
 
-        return true;
+        return true; /* If we reach here, we're sure an exception occurs (fault_hit is true), but was not #UD (must be a #GP), confirming EFER.SVME being 1 */
     #else
         return false;
     #endif  
@@ -14165,8 +14179,7 @@ public:
             return false;
         }
 
-        /* Analyze TPM algorithms 
-        */
+        /* Analyze TPM algorithms */
         auto trim = [](std::string s) {
             auto ws = [](unsigned char c) { 
                 return std::isspace(c) != 0;
@@ -15578,7 +15591,7 @@ public:
         };
 
         if (core::is_enabled(flags, DYNAMIC)) {
-            if (percent_tmp == 0) { return "Running on baremetal"; }
+            if (percent_tmp == 0) { return "Running on bare metal"; }
             if (percent_tmp <= 20) { return make_conclusion(very_unlikely); }
             if (percent_tmp <= 35) { return make_conclusion(unlikely); }
             if (percent_tmp < 50) { return make_conclusion(potentially); }
@@ -15591,7 +15604,7 @@ public:
             return make_conclusion(inside_vm);
         }
 
-        return "Running on baremetal";
+        return "Running on bare metal";
     }
 
 
