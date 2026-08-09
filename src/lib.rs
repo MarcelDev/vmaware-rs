@@ -107,34 +107,41 @@ impl std::fmt::Display for VmType {
     }
 }
 
-unsafe extern "C" {
+extern "C" {
     fn vmaware_detect(out: *mut bool, err: *mut *mut c_char) -> bool;
     fn vmaware_check(flag: u8, out: *mut bool, err: *mut *mut c_char) -> bool;
     fn vmaware_type(out: *mut *mut c_char, err: *mut *mut c_char) -> bool;
     fn vmaware_percentage(out: *mut u8, err: *mut *mut c_char) -> bool;
     fn vmaware_conclusion(out: *mut *mut c_char, err: *mut *mut c_char) -> bool;
     fn vmaware_detected_count(out: *mut u8, err: *mut *mut c_char) -> bool;
+    fn vmaware_is_hardened(out: *mut bool, err: *mut *mut c_char) -> bool;
     fn vmaware_brand(out: *mut *mut c_char, err: *mut *mut c_char) -> bool;
     fn free_string(s: *mut c_char);
+}
+
+unsafe fn take_ffi_string(ptr: *mut c_char) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        let s = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        free_string(ptr);
+        Some(s)
+    }
 }
 
 pub fn detect() -> Result<bool, VmawareError> {
     let mut out = false;
     let mut err: *mut c_char = std::ptr::null_mut();
 
-    unsafe {
-        if vmaware_detect(&mut out, &mut err) {
-            Ok(out)
-        } else {
-            if err.is_null() {
-                Err(VmawareError::Unknown)
-            } else {
-                let e = CStr::from_ptr(err)
-                    .to_string_lossy()
-                    .into_owned();
-                free_string(err);
-                Err(VmawareError::Ffi(e))
-            }
+    let ok = unsafe { vmaware_detect(&mut out, &mut err) };
+
+    if ok {
+        unsafe { take_ffi_string(err) }; 
+        Ok(out)
+    } else {
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
         }
     }
 }
@@ -146,18 +153,19 @@ pub fn vm_type() -> Result<VmType, VmawareError> {
     let ok = unsafe { vmaware_type(&mut out, &mut err) };
 
     if ok {
-        if out.is_null() {
-            return Err(VmawareError::Unknown);
+        let value = unsafe { take_ffi_string(out) };
+        unsafe { take_ffi_string(err) }; 
+
+        match value {
+            Some(val) => Ok(VmType::from(val)),
+            None => Err(VmawareError::Unknown),
         }
-        let value = unsafe { CStr::from_ptr(out) }.to_string_lossy().into_owned();
-        unsafe { free_string(out) };
-        Ok(VmType::from(value))
-    } else if err.is_null() {
-        Err(VmawareError::Unknown)
     } else {
-        let e = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        unsafe { free_string(err) };
-        Err(VmawareError::Ffi(e))
+        unsafe { take_ffi_string(out) }; 
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
     }
 }
 
@@ -168,13 +176,13 @@ pub fn check(flag: flags) -> Result<bool, VmawareError> {
     let ok = unsafe { vmaware_check(flag as u8, &mut out, &mut err) };
 
     if ok {
+        unsafe { take_ffi_string(err) }; 
         Ok(out)
-    } else if err.is_null() {
-        Err(VmawareError::Unknown)
     } else {
-        let e = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        unsafe { free_string(err) };
-        Err(VmawareError::Ffi(e))
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
     }
 }
 
@@ -185,13 +193,13 @@ pub fn percentage() -> Result<u8, VmawareError> {
     let ok = unsafe { vmaware_percentage(&mut out, &mut err) };
 
     if ok {
+        unsafe { take_ffi_string(err) }; 
         Ok(out)
-    } else if err.is_null() {
-        Err(VmawareError::Unknown)
     } else {
-        let e = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        unsafe { free_string(err) };
-        Err(VmawareError::Ffi(e))
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
     }
 }
 
@@ -202,18 +210,19 @@ pub fn conclusion() -> Result<String, VmawareError> {
     let ok = unsafe { vmaware_conclusion(&mut out, &mut err) };
 
     if ok {
-        if out.is_null() {
-            return Err(VmawareError::Unknown);
+        let value = unsafe { take_ffi_string(out) };
+        unsafe { take_ffi_string(err) }; 
+
+        match value {
+            Some(val) => Ok(val),
+            None => Err(VmawareError::Unknown),
         }
-        let value = unsafe { CStr::from_ptr(out) }.to_string_lossy().into_owned();
-        unsafe { free_string(out) };
-        Ok(value)
-    } else if err.is_null() {
-        Err(VmawareError::Unknown)
     } else {
-        let e = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        unsafe { free_string(err) };
-        Err(VmawareError::Ffi(e))
+        unsafe { take_ffi_string(out) }; 
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
     }
 }
 
@@ -224,13 +233,30 @@ pub fn detected_count() -> Result<u8, VmawareError> {
     let ok = unsafe { vmaware_detected_count(&mut out, &mut err) };
 
     if ok {
+        unsafe { take_ffi_string(err) };
         Ok(out)
-    } else if err.is_null() {
-        Err(VmawareError::Unknown)
     } else {
-        let e = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        unsafe { free_string(err) };
-        Err(VmawareError::Ffi(e))
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
+    }
+}
+
+pub fn is_hardened() -> Result<bool, VmawareError> {
+    let mut out: bool = false;
+    let mut err: *mut c_char = std::ptr::null_mut();
+
+    let ok = unsafe { vmaware_is_hardened(&mut out, &mut err) };
+
+    if ok {
+        unsafe { take_ffi_string(err) }; 
+        Ok(out)
+    } else {
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
     }
 }
 
@@ -241,18 +267,19 @@ pub fn brand() -> Result<String, VmawareError> {
     let ok = unsafe { vmaware_brand(&mut out, &mut err) };
 
     if ok {
-        if out.is_null() {
-            return Err(VmawareError::Unknown);
+        let value = unsafe { take_ffi_string(out) };
+        unsafe { take_ffi_string(err) }; 
+
+        match value {
+            Some(val) => Ok(val),
+            None => Err(VmawareError::Unknown),
         }
-        let value = unsafe { CStr::from_ptr(out) }.to_string_lossy().into_owned();
-        unsafe { free_string(out) };
-        Ok(value)
-    } else if err.is_null() {
-        Err(VmawareError::Unknown)
     } else {
-        let e = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
-        unsafe { free_string(err) };
-        Err(VmawareError::Ffi(e))
+        unsafe { take_ffi_string(out) }; 
+        match unsafe { take_ffi_string(err) } {
+            Some(e) => Err(VmawareError::Ffi(e)),
+            None => Err(VmawareError::Unknown),
+        }
     }
 }
 
