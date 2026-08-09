@@ -60,8 +60,8 @@ pub enum VmType {
 impl From<String> for VmType {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "Hypervisor (type 1)" | "Hypervisor (Type 1)" => VmType::Hv1, // source has inconsistent casing (WSL/DBVM)
-            "Hypervisor (type 2)" => VmType::Hv2,
+            "Hypervisor (Type 1)" => VmType::Hv1,
+            "Hypervisor (Type 2)" => VmType::Hv2,
             "Hypervisor (unknown type)" => VmType::HvUnknown,
             "Hosted hypervisor / accelerator (type 2)" => VmType::HostedAccelerator,
             "Emulator" => VmType::Emulator,
@@ -85,13 +85,13 @@ impl From<String> for VmType {
 impl std::fmt::Display for VmType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VmType::Hv1 => write!(f, "Hypervisor (type 1)"),
-            VmType::Hv2 => write!(f, "Hypervisor (type 2)"),
+            VmType::Hv1 => write!(f, "Hypervisor (Type 1)"),
+            VmType::Hv2 => write!(f, "Hypervisor (Type 2)"),
             VmType::HvUnknown => write!(f, "Hypervisor (unknown type)"),
-            VmType::HostedAccelerator => write!(f, "Hosted hypervisor / accelerator (type 2)"),
+            VmType::HostedAccelerator => write!(f, "Hosted hypervisor / accelerator (Type 2)"),
             VmType::Emulator => write!(f, "Emulator"),
-            VmType::EmulatorHv2 => write!(f, "Emulator/Hypervisor (type 2)"),
-            VmType::Paravirtualised => write!(f, "Paravirtualised/Hypervisor (type 2)"),
+            VmType::EmulatorHv2 => write!(f, "Emulator/Hypervisor (Type 2)"),
+            VmType::Paravirtualised => write!(f, "Paravirtualised/Hypervisor (Type 2)"),
             VmType::Sandbox => write!(f, "Sandbox"),
             VmType::Container => write!(f, "Container"),
             VmType::CompatibilityLayer => write!(f, "Compatibility layer"),

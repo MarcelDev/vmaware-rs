@@ -3,14 +3,14 @@ fn main() {
         .cpp(true)
         .include("deps")
         .file("src/wrapper.cpp")
-        .flag_if_supported("-std=c++17")
+        .flag_if_supported("-std=c++20")
         .compile("vmaware-bridge");
 
     let bindings = bindgen::Builder::default()
         .header("deps/vmaware.hpp")
         .clang_arg("-x")
         .clang_arg("c++")
-        .clang_arg("-std=c++17")
+        .clang_arg("-std=c++20")
         .allowlist_type("VM_enum_flags")
         .allowlist_type("VM_brand_enum")
         .allowlist_var("VM_technique_count")
