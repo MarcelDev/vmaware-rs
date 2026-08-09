@@ -35,14 +35,14 @@
  *
  *
  * ============================== SECTIONS ==================================
- * - enums for publicly accessible techniques  => line 478
- * - struct for internal cpu operations        => line 754
- * - struct for internal memoization           => line 2853
- * - struct for internal utility functions     => line 3419
- * - struct for internal core components       => line 13125
- * - start of VM detection technique list      => line 5017
- * - start of public VM detection functions    => line 13515
- * - start of externally defined variables     => line 14322
+ * - enums for publicly accessible techniques  => line 643
+ * - struct for internal cpu operations        => line 922
+ * - struct for internal memoization           => line 3089
+ * - struct for internal utility functions     => line 4123
+ * - struct for internal core components       => line 14551
+ * - start of VM detection technique list      => line 5664
+ * - start of public VM detection functions    => line 14946
+ * - start of externally defined variables     => line 15663
  *
  *
  * ============================== EXAMPLE ===================================
@@ -572,25 +572,25 @@
                 0x48, 0xCF                                                              /* iretq */
             };
             static const unsigned char dbvm_intel_stub[] VMAWARE_SECTION = {
-                0x49, 0x89, 0xD0,                               /* mov r8, rdx */
-                0x48, 0x89, 0xC8,                               /* mov rax, rcx */
+                0x52,                                       /* push rdx */
+                0x48, 0x89, 0xC8,                           /* mov rax, rcx */
                 0x48, 0xBA, 0x10, 0x32, 0x54, 0x76, 0x00, 0x00, 0x00, 0x00, /* mov rdx, 0x76543210 */
                 0x48, 0xB9, 0x90, 0x90, 0x90, 0x90, 0x00, 0x00, 0x00, 0x00, /* mov rcx, 0x90909090 */
-                0x0F, 0x01, 0xC1,                               /* vmcall */
-                0x49, 0x89, 0x00,                               /* mov [r8], rax (mov [imm64], rax ; &vmcallResult) */
-                0xC3                                            /* ret */
+                0x0F, 0x01, 0xC1,                           /* vmcall */
+                0x41, 0x5A,                                 /* pop r8 */
+                0x49, 0x89, 0x00,                           /* mov [r8], rax */
+                0xC3                                        /* ret */
             };
-
             static const unsigned char dbvm_amd_stub[] VMAWARE_SECTION = {
-                0x49, 0x89, 0xD0,                               /* mov r8, rdx */
-                0x48, 0x89, 0xC8,                               /* mov rax, rcx */
+                0x52,                                       /* push rdx */
+                0x48, 0x89, 0xC8,                           /* mov rax, rcx */
                 0x48, 0xBA, 0x10, 0x32, 0x54, 0x76, 0x00, 0x00, 0x00, 0x00, /* mov rdx, 0x76543210 */
                 0x48, 0xB9, 0x90, 0x90, 0x90, 0x90, 0x00, 0x00, 0x00, 0x00, /* mov rcx, 0x90909090 */
-                0x0F, 0x01, 0xD9,                               /* vmmcall */
-                0x49, 0x89, 0x00,                               /* mov [r8], rax (mov [imm64], rax ; &vmcallResult) */
-                0xC3                                            /* ret */
+                0x0F, 0x01, 0xD9,                           /* vmmcall */
+                0x41, 0x5A,                                 /* pop r8 */
+                0x49, 0x89, 0x00,                           /* mov [r8], rax */
+                0xC3                                        /* ret */
             };
-
             static const unsigned char dbvm_icebp_stub[] VMAWARE_SECTION = {
                 0xF1,                                           /* icebp */
                 0xC3                                            /* ret */
@@ -3078,11 +3078,15 @@ public:
     static VMAWARE_CONSTEXPR void str_copy(char* VMAWARE_RESTRICT dest, const char* VMAWARE_RESTRICT src, const size_t max_len) noexcept {
         VMAWARE_ASSUME(dest != nullptr);
         VMAWARE_ASSUME(src != nullptr);
+
         size_t i = 0;
+        if (max_len == 0) return;
+
         while (src[i] != '\0' && i < max_len - 1) {
             dest[i] = src[i];
             i++;
         }
+
         dest[i] = '\0';
     }
 
@@ -3515,6 +3519,11 @@ public:
                         return {};
                     }
 
+                    const size_t expected_size = offsetof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Processor.GroupMask) + (ptr->Processor.GroupCount * sizeof(GROUP_AFFINITY));
+                    if (ptr->Size < expected_size) {
+                        return {};
+                    }
+
                     switch (ptr->Relationship) {
                     case RelationProcessorCore: {
                         const DWORD core_id = core_count++;
@@ -3846,8 +3855,8 @@ public:
             return exception_status;
         };
 
-        /* Retrieves the addresses of specified functions from a loaded module using the export directory, manual implementation of GetProcAddress */
-        static void get_function_address(const HMODULE hModule, const char* const VMAWARE_RESTRICT names[], void** const VMAWARE_RESTRICT functions, const size_t count) {
+        /* Retrieves the addresses of specified functions from a loaded module using the export directory, manual implementation of GetProcAddress without PE export forwarding parsing */
+        static void get_function_address(const HMODULE hModule, const char* const VMAWARE_RESTRICT names[], void** const VMAWARE_RESTRICT functions, const size_t count, const bool cache_result = true) {
             VMAWARE_ASSUME(names != nullptr);
             VMAWARE_ASSUME(functions != nullptr);
             using func_map = std::unordered_map<std::string, void*>;
@@ -3905,12 +3914,12 @@ public:
 
             /* Check export data directory exists */
             if (ntHeaders->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) {
-                return; /* no export directory */
+                return;
             }
 
             const auto& dd = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
             if (dd.VirtualAddress == 0 || dd.Size == 0) {
-                return; /* no exports */
+                return;
             }
 
             /* Validate export directory fits */
@@ -3923,7 +3932,7 @@ public:
             const DWORD nameCount = exportDir->NumberOfNames;
             const DWORD funcCount = exportDir->NumberOfFunctions;
 
-            constexpr DWORD MAX_NAMES = 1u << 20; /* 1M names is absurd but protective */
+            constexpr DWORD MAX_NAMES = 1u << 20;
             if (nameCount == 0 || nameCount > MAX_NAMES) return;
             if (funcCount == 0 || funcCount > MAX_NAMES) return;
 
@@ -3939,27 +3948,28 @@ public:
             const DWORD* funcRvas = reinterpret_cast<const DWORD*>(base + addr_funcs);
             const WORD* ordinals = reinterpret_cast<const WORD*>(base + addr_ord);
 
-            func_map& module_cache = function_cache[hModule];
-
             for (size_t i = 0; i < count; ++i) {
                 const char* current_name = names[i];
                 if (!current_name) continue;
                 const std::string s_name(current_name);
 
-                /* Check cache first */
-                const auto cache_it = module_cache.find(s_name);
-                if (VMAWARE_LIKELY(cache_it != module_cache.end())) {
-                    functions[i] = cache_it->second;
-                    continue;
+                /* Only query and populate the cache if it's not a dynamically loaded module with LoadLibrary */
+                if (cache_result) {
+                    func_map& module_cache = function_cache[hModule];
+                    const auto cache_it = module_cache.find(s_name);
+                    if (VMAWARE_LIKELY(cache_it != module_cache.end())) {
+                        functions[i] = cache_it->second;
+                        continue;
+                    }
                 }
 
-                /* Binary search over names (names array is typically sorted) */
+                /* Binary search over names */
                 DWORD lo = 0, hi = nameCount;
                 while (lo < hi) {
                     const DWORD mid = lo + (hi - lo) / 2;
                     const DWORD midNameRva = nameRvas[mid];
                     const char* midName = cstr_from_rva(midNameRva);
-                    if (!midName) { /* corrupted string table or something */
+                    if (!midName) {
                         lo = hi;
                         break;
                     }
@@ -3982,13 +3992,15 @@ public:
                         if (!valid_range(static_cast<size_t>(funcRva), 1)) continue;
                         void* addr = reinterpret_cast<void*>(base + funcRva);
                         functions[i] = addr;
-                        module_cache[s_name] = addr;
+
+                        if (cache_result) {
+                            function_cache[hModule][s_name] = addr;
+                        }
                         continue;
                     }
                 }
             }
         }
-
 
         [[nodiscard]] static HMODULE get_ntdll() noexcept {
             static HMODULE cached_ntdll = nullptr;
@@ -4521,46 +4533,49 @@ public:
                 USHORT proc_machine = 0;
                 USHORT native_machine = 0;
 
-                if (IsWow64Process2(current_process, &proc_machine, &native_machine)) {
-                    if ((native_machine == IMAGE_FILE_MACHINE_ARM64 &&
-                        (proc_machine == IMAGE_FILE_MACHINE_AMD64 ||
-                            proc_machine == IMAGE_FILE_MACHINE_I386)) ||
-                        (native_machine == IMAGE_FILE_MACHINE_ARMNT &&
-                            proc_machine == IMAGE_FILE_MACHINE_I386)) {
-                        return true;
+                const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+                if (kernel32) {
+                    using is_wow_64_process_2_fn = BOOL(__stdcall*)(HANDLE, USHORT*, USHORT*);
+                    is_wow_64_process_2_fn is_wow_64_process_2 = reinterpret_cast<is_wow_64_process_2_fn>(GetProcAddress(kernel32, "IsWow64Process2"));
+
+                    if (is_wow_64_process_2) {
+                        if (is_wow_64_process_2(current_process, &proc_machine, &native_machine)) {
+                            if (proc_machine == IMAGE_FILE_MACHINE_I386 ||
+                                (native_machine == IMAGE_FILE_MACHINE_ARM64 && proc_machine == IMAGE_FILE_MACHINE_AMD64)) {
+                                return true;
+                            }
+                        }
                     }
                 }
 
-                if (native_machine == IMAGE_FILE_MACHINE_ARM64 ||
-                    native_machine == IMAGE_FILE_MACHINE_ARMNT) {
-
-                    using get_process_information_fn =
-                        BOOL(__stdcall*)(HANDLE, PROCESS_INFORMATION_CLASS, PVOID, DWORD);
-
+                if (native_machine == IMAGE_FILE_MACHINE_ARM64 || native_machine == IMAGE_FILE_MACHINE_ARMNT) {
                     if (HMODULE ntdll = memory::get_ntdll()) {
-                        constexpr const char* names[] = { "GetProcessInformation" };
-                        void* funcs[1] = {};
-                        memory::get_function_address(ntdll, names, funcs, 1);
+                        constexpr const char* function_names[] = { "NtQueryInformationProcess" };
+                        void* functions[ARRAYSIZE(function_names)] = {};
+                        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
-                        if (auto get_proc_info =
-                            reinterpret_cast<get_process_information_fn>(funcs[0])) {
+                        using nt_query_information_process_fn = NTSTATUS(__stdcall*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+                        auto nt_query_information_process = reinterpret_cast<nt_query_information_process_fn>(functions[0]);
 
+                        if (nt_query_information_process) {
                             struct PROCESS_MACHINE_INFORMATION {
                                 USHORT ProcessMachine;
                                 USHORT Res0;
                                 DWORD MachineAttributes;
                             } pmInfo{};
 
-                            constexpr auto process_machine_type_info =
-                                static_cast<PROCESS_INFORMATION_CLASS>(9);
-
-                            if (get_proc_info(current_process,
-                                process_machine_type_info,
+                            ULONG returned_len = 0;
+                            NTSTATUS status = nt_query_information_process(
+                                current_process,
+                                90, /* ProcessMachineInternalInformation */ 
                                 &pmInfo,
-                                sizeof(pmInfo))) {
+                                sizeof(pmInfo),
+                                &returned_len
+                            );
+
+                            if (status >= 0) { 
                                 if (pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_I386 ||
-                                    (native_machine == IMAGE_FILE_MACHINE_ARM64 &&
-                                        pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_AMD64)) {
+                                    (native_machine == IMAGE_FILE_MACHINE_ARM64 && pmInfo.ProcessMachine == IMAGE_FILE_MACHINE_AMD64)) {
                                     return true;
                                 }
                             }
@@ -4669,7 +4684,7 @@ public:
 
                 ULONG size = 1024 * 1024;
                 HANDLE heap = GetProcessHeap();
-                PVOID buffer = HeapAlloc(heap, 0, size);
+                PVOID buffer = HeapAlloc(heap, HEAP_ZERO_MEMORY, size);
                 if (!buffer) return true;
 
                 ULONG needed = 0;
@@ -4682,6 +4697,12 @@ public:
                         HeapFree(heap, 0, buffer);
                         return true;
                     }
+                }
+
+                const NTSTATUS status = nt_query_system_information(0x16, buffer, size, &needed);
+                if (!NT_SUCCESS(status)) {
+                    HeapFree(heap, 0, buffer);
+                    return false;
                 }
 
                 bool found = false;
@@ -4697,49 +4718,6 @@ public:
 
                 HeapFree(heap, 0, buffer);
                 return found;
-            };
-
-            /* Check if the Windows Hypervisor Platform interface is responsive and confirms a running hypervisor */
-            auto is_hyperv_interface_present = []() noexcept -> bool {
-                enum WHV_CAPABILITY_CODE {
-                    WHvCapabilityCodeHypervisorPresent = 0x00000000,
-                };
-
-                HMODULE h_whp = LoadLibraryW(L"WinHvPlatform.dll");
-                if (!h_whp) {
-                    return false;
-                }
-
-                const char* names[] = { "WHvGetCapability" };
-                void* funcs[1] = { nullptr };
-
-                memory::get_function_address(h_whp, names, funcs, 1);
-
-                bool is_present = false;
-                if (funcs[0]) {
-                    using whv_get_capability_fn = HRESULT(__stdcall*)(
-                        WHV_CAPABILITY_CODE CapabilityCode,
-                        void* CapabilityBuffer,
-                        UINT32 CapabilityBufferSize,
-                        UINT32* WrittenBufferSize
-                    );
-
-                    const auto whv_get_capability = reinterpret_cast<whv_get_capability_fn>(funcs[0]);
-                    BOOL present_val = FALSE;
-                    UINT32 written = 0;
-                    HRESULT hr = whv_get_capability(
-                        WHvCapabilityCodeHypervisorPresent,
-                        &present_val,
-                        sizeof(present_val),
-                        &written
-                    );
-                    if (SUCCEEDED(hr)) {
-                        is_present = (present_val == 1);
-                    }
-                }
-
-                FreeLibrary(h_whp);
-                return is_present;
             };
 
             /* Check if the virtualization infrastructure driver is present */
@@ -4804,7 +4782,8 @@ public:
                         const size_t win_dir_cch = wcslen(win_dir);
 
                         BOOL is_wow64 = FALSE;
-                        IsWow64Process(GetCurrentProcess(), &is_wow64);
+                        const HANDLE current_process = reinterpret_cast<HANDLE>(-1LL);
+                        IsWow64Process(current_process, &is_wow64);
 
                         wchar_t tmp[MAX_PATH]{};
                         memcpy(tmp, win_dir, win_dir_cch * sizeof(wchar_t));
@@ -4888,12 +4867,17 @@ public:
                     return false;
                 };
 
-                HMODULE wintrust_hmodule = LoadLibraryW(L"wintrust.dll");
+                HMODULE wintrust_hmodule = LoadLibraryExW(L"wintrust.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
                 if (!wintrust_hmodule) return false;
+
+                struct wintrust_guard {
+                    HMODULE h;
+                    ~wintrust_guard() { if (h) FreeLibrary(h); }
+                } guard{ wintrust_hmodule };
 
                 constexpr const char* wintrust_names[] = { "WinVerifyTrust" };
                 void* wintrust_funcs[ARRAYSIZE(wintrust_names)] = {};
-                memory::get_function_address(wintrust_hmodule, wintrust_names, wintrust_funcs, ARRAYSIZE(wintrust_names));
+                memory::get_function_address(wintrust_hmodule, wintrust_names, wintrust_funcs, ARRAYSIZE(wintrust_names), false);
 
                 using win_verify_trust_fn = LONG(__stdcall*)(HWND, GUID*, LPVOID);
                 const auto win_verify_trust = reinterpret_cast<win_verify_trust_fn>(wintrust_funcs[0]);
@@ -4923,7 +4907,7 @@ public:
                     return (trust_status == ERROR_SUCCESS);
                 };
 
-                /* enumerate loaded modules */
+                /* Enumerate loaded modules */
                 ULONG needed = 0;
                 NTSTATUS status = nt_query_system_information(11, nullptr, 0, &needed);
                 if (status != (NTSTATUS)0xC0000004L || !needed) return false;
@@ -4935,6 +4919,8 @@ public:
                 auto modules = reinterpret_cast<PRTL_PROCESS_MODULES>(buffer.data());
                 for (ULONG i = 0; i < modules->NumberOfModules; ++i) {
                     wchar_t module_path[MAX_PATH]{};
+                    modules->Modules[i].FullPathName[255] = '\0';
+
                     if (!to_wide(reinterpret_cast<const char*>(modules->Modules[i].FullPathName), module_path, ARRAYSIZE(module_path))) {
                         continue;
                     }
@@ -4942,7 +4928,7 @@ public:
                     if (!normalize_path(module_path)) continue;
 
                     if (_wcsicmp(basename(module_path), L"Vid.sys") == 0) {
-                        if (!is_signature_valid(module_path)) return false;
+                        if (!is_signature_valid(module_path)) return false; 
                         debug("HYPER-X: Driver signature is valid");
                         if (!file_has_ascii(module_path, "vid.pdb")) return false;
                         debug("HYPER-X: Driver debugging symbols are valid");
@@ -4983,48 +4969,17 @@ public:
                 else {
                     /* If we reach here, we do some sanity checks to ensure a hypervisor is not trying to spoof itself as Hyper-V, attempting to bypass some detections */
                     const char* brand_str = cpu::cpu_manufacturer(cpu::leaf::hypervisor);
-                #if (x86_64)
-                    u8 idtr_buffer[10] = { 0 };
-
-                    /* Not using SEH here on purpose, and doesn't matter in what CPU core this runs on */
-                    #if (CLANG || GCC)
-                        __asm__ volatile("sidt %0" : "=m"(idtr_buffer));
-                    #elif (MSVC)
-                        #pragma pack(push, 1)
-                        struct {
-                            USHORT Limit;
-                            ULONG_PTR Base;
-                        } idtr = { 0 };
-                        #pragma pack(pop)       
-                        __sidt(&idtr);
-
-                        volatile u8* idtr_ptr = (volatile u8*)&idtr;
-                        for (size_t j = 0; j < sizeof(idtr); ++j) {
-                            idtr_buffer[j] = idtr_ptr[j];
-                        }
-                    #endif
-
-                    ULONG_PTR idt_base = 0;
-                    memcpy(&idt_base, &idtr_buffer[2], sizeof(idt_base));
-
-                    /* If running under Hyper-V in AMD64 (doesnt matter the VTL/partition level), the returned IDT base is emulated at KiOp_SGDTSIDT to prevent kernel address leakage */
-                    bool is_hyper_v_host = (idt_base == 0xfffff80000001000) && (enlightenment_str && strcmp(brand_str, "Microsoft Hv") == 0);
-                #else
                     bool is_hyper_v_host = (enlightenment_str && strcmp(brand_str, "Microsoft Hv") == 0);
-                #endif
 
                     if (util::is_windows_11()) {
                         const bool hal = is_halh_present();
                         const bool vid = is_hyperv_service_present();
-                        const bool whp = is_hyperv_interface_present();
 
                         debug("HYPER-X: Hypervisor Hardware Abstraction Layer: ", hal);
                         debug("HYPER-X: Virtual Infrastructure Driver: ", vid);
-                        debug("HYPER-X: Windows Hypervisor Platform: ", whp);
 
                         is_hyper_v_host &= hal;
                         is_hyper_v_host &= vid;
-                        is_hyper_v_host &= whp;
                     }
 
                     if (is_hyper_v_host) {
@@ -5064,7 +5019,42 @@ public:
             return rtl_get_version(&vi) == 0 && vi.dwBuildNumber >= 22000;
         }
 
-        static bool get_manufacturer_model(const char** out_manufacturer, const char** out_model) noexcept {
+        [[nodiscard]] static bool is_windows_8_or_newer() noexcept {
+            const HMODULE ntdll = memory::get_ntdll();
+            if (!ntdll) return false;
+
+            const char* function_names[] = { "RtlGetVersion" };
+            void* functions[ARRAYSIZE(function_names)] = {};
+            memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+
+            using rtl_get_version_fn = NTSTATUS(__stdcall*)(PRTL_OSVERSIONINFOW);
+            const auto rtl_get_version = reinterpret_cast<rtl_get_version_fn>(functions[0]);
+            if (!rtl_get_version) return false;
+
+            RTL_OSVERSIONINFOW vi{};
+            vi.dwOSVersionInfoSize = sizeof(vi);
+
+            return (rtl_get_version(&vi) == 0 && (vi.dwMajorVersion > 6 || (vi.dwMajorVersion == 6 && vi.dwMinorVersion >= 2)));
+        }
+
+        [[nodiscard]] static bool is_32bit_execution_disabled() noexcept {
+        #if (x86_64)
+            wchar_t wow64_dir[MAX_PATH] = { 0 };
+            const UINT ret = GetSystemWow64DirectoryW(wow64_dir, MAX_PATH);
+            if (ret == 0) {
+                const DWORD err = GetLastError();
+                if (err == ERROR_CALL_NOT_IMPLEMENTED || err == ERROR_PATH_NOT_FOUND) {
+                    return true; 
+                }
+                return true;
+            }
+            return false;
+        #else
+            return false;
+        #endif
+        }
+
+        [[nodiscard]] static bool get_manufacturer_model(const char** out_manufacturer, const char** out_model) noexcept {
             if (out_manufacturer) *out_manufacturer = "";
             if (out_model) *out_model = "";
 
@@ -5817,7 +5807,6 @@ public:
         const bool intel = cpu::is_intel();
         const bool amd = cpu::is_amd();
 
-        /* If neither amd or intel, return false */
         if (!(intel || amd)) {
             debug("BOCHS_CPU: neither AMD or Intel detected, returned false");
             return false;
@@ -6158,9 +6147,10 @@ public:
         #if (WINDOWS && defined __VMAWARE_DEBUG__)
             const char* manufacturer = "";
             const char* model = "";
-            util::get_manufacturer_model(&manufacturer, &model);
-            debug("{\"manufacturer\": \"", manufacturer,
-                "\", \"model\": \"", model, "\"}");
+            if (util::get_manufacturer_model(&manufacturer, &model)) {
+                debug("{\"manufacturer\": \"", manufacturer,
+                    "\", \"model\": \"", model, "\"}");
+            }            
         #endif
 
         const u32 actual = memo::thread_count::fetch();
@@ -6493,7 +6483,7 @@ public:
         WHV_REGISTER_VALUE values[reg_count]{};
 
         if (check_nested_hypervisors) {
-            winhv_dll = LoadLibraryW(L"WinHvPlatform.dll");
+            winhv_dll = LoadLibraryExW(L"WinHvPlatform.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
             ntdll_dll = memory::get_ntdll();
 
             if (!winhv_dll || !ntdll_dll) {
@@ -6512,7 +6502,7 @@ public:
                     "WHvDeletePartition"  
                 };
                 void* whv_functions[ARRAYSIZE(whv_function_names)] = {};
-                memory::get_function_address(winhv_dll, whv_function_names, whv_functions, ARRAYSIZE(whv_function_names));
+                memory::get_function_address(winhv_dll, whv_function_names, whv_functions, ARRAYSIZE(whv_function_names), false);
 
                 constexpr const char* nt_function_names[] = {
                     "NtAllocateVirtualMemory",
@@ -7041,7 +7031,7 @@ public:
 
 
     /**
-     * @brief Check if the chassis type is valid (it's very often invalid in VMs)
+     * @brief Check if the chassis type is valid
      * @category Linux
      * @implements VM::CTYPE
      */
@@ -7341,7 +7331,6 @@ public:
     /**
 	 * @brief Check for AMD-SEV MSR running on the system
 	 * @category x86, Linux, MacOS
-	 * @author idea from virt-what
      * @warning Permissions required
      * @implements VM::AMD_SEV_MSR
 	 */
@@ -7433,7 +7422,7 @@ public:
      * @warning Permissions required
      * @implements VM::QEMU_USB
      */
-    [[nodiscard]] static bool qemu_USB() {
+    [[nodiscard]] static bool qemu_usb() {
         if (!util::is_admin()) {
             return false;
         }
@@ -7483,7 +7472,8 @@ public:
             if (
                 (entry->d_name[0] == '.' && entry->d_name[1] == '\0') ||
                 (entry->d_name[1] == '.' && entry->d_name[2] == '\0')
-                ) {
+               ) 
+            {
                 continue;
             }
 
@@ -7658,11 +7648,11 @@ public:
      */
     [[nodiscard]] static bool dmi_scan() {
         /*
-        cat: /sys/class/dmi/id/board_serial: Permission denied
-        cat: /sys/class/dmi/id/chassis_serial: Permission denied
-        cat: /sys/class/dmi/id/product_serial: Permission denied
-        cat: /sys/class/dmi/id/product_uuid: Permission denied
-        */
+         *  cat: /sys/class/dmi/id/board_serial:   Permission denied
+         *  cat: /sys/class/dmi/id/chassis_serial: Permission denied
+         *  cat: /sys/class/dmi/id/product_serial: Permission denied
+         *  cat: /sys/class/dmi/id/product_uuid:   Permission denied
+         */
 
         constexpr std::array<const char*, 7> dmi_array{
             "/sys/class/dmi/id/bios_vendor",
@@ -7734,7 +7724,6 @@ public:
 
     /**
      * @brief Check for the VM bit in the SMBIOS data
-     * @author idea from https://github.com/systemd/systemd/blob/main/src/basic/virt.c
      * @category Linux
      * @warning Permissions required
      * @implements VM::SMBIOS_VM_BIT
@@ -7765,7 +7754,6 @@ public:
 
     /**
      * @brief Check for podman file in /run/
-     * @author idea from https://github.com/systemd/systemd/blob/main/src/basic/virt.c
      * @category Linux
      * @implements VM::PODMAN_FILE
      */
@@ -7780,7 +7768,6 @@ public:
 
     /**
      * @brief Check for WSL or microsoft indications in /proc/ subdirectories
-     * @author idea from https://github.com/systemd/systemd/blob/main/src/basic/virt.c
      * @category Linux
      * @implements VM::WSL_PROC
      */
@@ -7814,7 +7801,8 @@ public:
         if (
             (util::find(osrelease, "WSL") || util::find(osrelease, "Microsoft")) &&
             (util::find(version,   "WSL") || util::find(version,   "Microsoft"))
-        ) {
+           ) 
+        {
             return core::add(brand_enum::WSL);
         }
 
@@ -7823,7 +7811,7 @@ public:
 
 
     /**
-     * @brief Detect QEMU fw_cfg interface. This first checks the Device Tree for a fw-cfg node or hypervisor tag, then verifies the presence of the qemu_fw_cfg module and firmware directories in sysfs.
+     * @brief Check QEMU fw_cfg interface
      * @category Linux
      * @implements VM::QEMU_FW_CFG
      */
@@ -7832,7 +7820,7 @@ public:
          * Linux DT method: inspired by https://github.com/ShellCode33/VM-Detection
          * Linux sysfs method: looks for /sys/module/qemu_fw_cfg/ & /sys/firmware/qemu_fw_cfg/
          *
-         * 1) device Tree-based detection
+         * 1) Device Tree-based detection
          */
         if (util::exists("/proc/device-tree/fw-cfg")) {
             return core::add(brand_enum::QEMU);
@@ -8066,7 +8054,6 @@ public:
      * --- SIDT ---
      * @author Matteo Malvica
      * @author Idea to check VPC's range from Tom Liston and Ed Skoudis' paper "On the Cutting Edge: Thwarting Virtual Machine Detection" (Windows)
-     * @link https://www.matteomalvica.com/blog/2018/12/05/detecting-vmware-on-64-bit-systems/ (Linux)
      * 
      */
     [[nodiscard]] static bool system_registers() {
@@ -8706,7 +8693,7 @@ public:
             }
         }
 
-        auto fetch_and_scan = [&](DWORD provider, DWORD table_id) noexcept -> bool {
+        auto fetch_and_scan = [&](const DWORD provider, const DWORD table_id) -> bool {
             const DWORD sz = GetSystemFirmwareTable(provider, table_id, nullptr, 0);
             if (sz == 0) return false;
 
@@ -9424,8 +9411,10 @@ public:
                 bool success = false;
                 if (NT_SUCCESS(query_st)) {
                     BYTE* payload = reinterpret_cast<BYTE*>(allocation_base) + header_size;
-                    memcpy(out_buf, payload, out_size);
-                    success = true;
+                    if (query_iosb.Information >= header_size + out_size) {
+                        memcpy(out_buf, payload, out_size);
+                        success = true;
+                    }   
                 }
 
                 SIZE_T free_size = 0;
@@ -9512,8 +9501,8 @@ public:
              * Stack buffer attempt
              * we first try to read the storage properties into a small stack buffer to avoid heap
              */
-            BYTE stackBuf[512] = { 0 };
-            const STORAGE_DEVICE_DESCRIPTOR* descriptor = reinterpret_cast<STORAGE_DEVICE_DESCRIPTOR*>(stackBuf);
+            BYTE stack_buffer[512] = { 0 };
+            const STORAGE_DEVICE_DESCRIPTOR* descriptor = reinterpret_cast<STORAGE_DEVICE_DESCRIPTOR*>(stack_buffer);
 
             STORAGE_PROPERTY_QUERY query{};
             query.PropertyId = StorageDeviceProperty;
@@ -9524,7 +9513,7 @@ public:
             st = nt_device_io_control_file(device, nullptr, nullptr, nullptr, &iosb,
                 ioctl,
                 &query, sizeof(query),
-                stackBuf, sizeof(stackBuf));
+                stack_buffer, sizeof(stack_buffer));
 
             BYTE* allocated_buffer = nullptr;
             SIZE_T allocated_size = 0;
@@ -9571,10 +9560,15 @@ public:
                 }
             }
 
+            /* Determine the physical boundary of the buffer currently in use */
+            const size_t current_buffer_size = allocated_buffer ? allocated_size : sizeof(stack_buffer);
+
             /* This part is just to validate the structure size returned by the driver to prevent out-of-bounds reads */
             {
                 const DWORD reported_size = descriptor->Size;
-                if (reported_size < sizeof(STORAGE_DEVICE_DESCRIPTOR) || static_cast<SIZE_T>(reported_size) > MAX_DESCRIPTOR_SIZE) {
+                if (reported_size < sizeof(STORAGE_DEVICE_DESCRIPTOR) ||
+                    static_cast<SIZE_T>(reported_size) > MAX_DESCRIPTOR_SIZE ||
+                    static_cast<SIZE_T>(reported_size) > current_buffer_size) { // Bound reported size to current physical buffer size
                     if (allocated_buffer) {
                         PVOID free_base = reinterpret_cast<PVOID>(allocated_buffer);
                         SIZE_T free_size = 0;
@@ -9586,11 +9580,16 @@ public:
                 }
             }
 
+            /* Restrict validation and scanning limits strictly to the active initialized portion */
+            const size_t active_size = (static_cast<size_t>(descriptor->Size) < current_buffer_size)
+                ? static_cast<size_t>(descriptor->Size)
+                : current_buffer_size;
+
             /* Serial number string within the descriptor structure */
             const u32 serial_offset = descriptor->SerialNumberOffset;
-            if (serial_offset > 0 && serial_offset < descriptor->Size) {
+            if (serial_offset > 0 && static_cast<size_t>(serial_offset) < active_size) {
                 const char* serial = reinterpret_cast<const char*>(descriptor) + serial_offset;
-                const size_t max_avail = static_cast<size_t>(descriptor->Size) - static_cast<size_t>(serial_offset);
+                const size_t max_avail = active_size - static_cast<size_t>(serial_offset);
                 const size_t serialLen = strnlen(serial, max_avail);
 
                 debug("DISK_SERIAL: ", serial);
@@ -9985,8 +9984,9 @@ public:
         if (std::unique_ptr<std::string> profiler_res_ptr = util::sys_result("system_profiler SPHardwareDataType")) {
             std::string& output = *profiler_res_ptr;
 
-            std::transform(output.begin(), output.end(), output.begin(),
-                [](u8 c) { return std::tolower(c); });
+            std::transform(output.begin(), output.end(), output.begin(),[](u8 c) {
+                return std::tolower(c); 
+            });
 
             if (util::find(output, keyword)) {
                 return true;
@@ -10043,42 +10043,49 @@ public:
      * @implements VM::WINE
      */
     [[nodiscard]] static bool wine() {
-        #if (_WIN32_WINNT < _WIN32_WINNT_WIN8)
+        const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        if (!kernel32) {
             return false;
-        #else
-            __try {
-                BOOL is_native_vhd_boot = 0;
-                /*
-                 * We dont call NtQuerySystemInformation with SystemPrefetchPathInformation | SystemHandleInformation
-                 * the point is to check if this kernel32.dll function throws an exception. This should actually make
-                 * VMAware unable to run on Wine since there's a missing import
-                 */
-                IsNativeVhdBoot(&is_native_vhd_boot);
-                VMAWARE_UNUSED(is_native_vhd_boot);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                debug("WINE: SEH invoked");
-                return true;
-            }
-        #endif
-
-        const HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
-        if (!k32) {
-           return false;
         }
 
-        constexpr const char* function_names[] = { "wine_get_unix_file_name" };
-        void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(k32, function_names, functions, ARRAYSIZE(function_names));
-
-        if (functions[0] != nullptr) {
+        using wine_get_unix_file_name_fn = char* (__stdcall*)(const wchar_t*, char*, DWORD);
+        auto wine_get_unix_file = reinterpret_cast<wine_get_unix_file_name_fn>(GetProcAddress(kernel32, "wine_get_unix_file_name"));
+        if (wine_get_unix_file != nullptr) {
+            debug("WINE: wine_get_unix_file_name detected");
             return core::add(brand_enum::WINE);
         }
 
+    #if (_WIN32_WINNT > _WIN32_WINNT_WIN8)
+        if (util::is_windows_8_or_newer()) {
+            using is_native_vhd_boot_fn = BOOL(__stdcall*)(PBOOL);
+            auto is_native_vhd_boot = reinterpret_cast<is_native_vhd_boot_fn>(GetProcAddress(kernel32, "IsNativeVhdBoot"));
+
+            if (is_native_vhd_boot) {
+                BOOL is_vhd = FALSE;
+                __try {
+                    /*
+                     * We dont call NtQuerySystemInformation with SystemPrefetchPathInformation | SystemHandleInformation
+                     * the point is to check if this kernel32.dll function throws an exception
+                     */
+                    is_native_vhd_boot(&is_vhd);
+                    return is_vhd;
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                    debug("WINE: IsNativeVhdBoot threw an exception (Wine stub behavior)");
+                    return core::add(brand_enum::WINE);
+                }
+            }
+            else {
+                debug("WINE: IsNativeVhdBoot export missing in Win8+ environment");
+                return core::add(brand_enum::WINE);
+            }
+        }
+    #endif
+
         return false;
     }
-                
-                
+
+
     /**
      * @brief Check what power states are enabled
      * @category Windows
@@ -10093,9 +10100,7 @@ public:
 
         if (!functions[0]) return false;
 
-        using nt_power_information_fn = NTSTATUS(__stdcall*)(POWER_INFORMATION_LEVEL,
-            PVOID, ULONG,
-            PVOID, ULONG);
+        using nt_power_information_fn = NTSTATUS(__stdcall*)(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
         const auto nt_power_information = reinterpret_cast<nt_power_information_fn>(functions[0]);
 
         SYSTEM_POWER_CAPABILITIES caps{};
@@ -10251,7 +10256,7 @@ public:
  
 
     /**
-     * @brief Check for official VPC method
+     * @brief Check for presence of VPC
      * @category Windows, x86_32
      * @implements VM::VPC_INVALID
      */
@@ -10991,6 +10996,7 @@ public:
          * If they don't match, we have been redirected, confirming the presence of Sandboxie
          */
         const bool mismatch = (object_name->Name.Length != expected_name.Length) ||
+            (object_name->Name.Buffer == nullptr) ||
             (memcmp(object_name->Name.Buffer, expected_name.Buffer, expected_name.Length) != 0);
 
         return mismatch ? core::add(brand_enum::SANDBOXIE) : false;
@@ -11088,17 +11094,11 @@ public:
             st = nt_query_key(key, InfoClass, info_buffer.data(), static_cast<ULONG>(info_buffer.size()), &returned_len);
         }
 
-        bool has_values = false;
+        bool has_subkeys = false;
         if (NT_SUCCESS(st) && returned_len >= sizeof(KEY_FULL_INFORMATION)) {
             const auto* kfi = reinterpret_cast<PKEY_FULL_INFORMATION>(info_buffer.data());
-
-            /*
-             * Check if the registry key has any values associated with it
-             * If 'Values' is 0, the audio system is likely uninitialized or barren,
-             * which strongly suggests a virtualized/sandbox environment
-             */
-            const DWORD value_count = static_cast<DWORD>(kfi->Values); /* values, not subkeys */
-            has_values = (value_count > 0);
+            const DWORD subkey_count = static_cast<DWORD>(kfi->SubKeys);
+            has_subkeys = (subkey_count > 0);
         }
         else {
             nt_close(key);
@@ -11107,7 +11107,7 @@ public:
 
         nt_close(key);
 
-        return has_values;
+        return !has_subkeys;
     }
     
     
@@ -12376,7 +12376,7 @@ public:
         SIZE_T amd_stub_size = sizeof(amd_bytes);
 
         const u8* bytes = nullptr;
-        SIZE_T codeSize = 0;
+        SIZE_T code_size = 0;
 
         LPVOID amd_target_mem = nullptr;
         LPVOID exec_mem = nullptr;
@@ -12459,25 +12459,25 @@ public:
                 }
             #endif
                 bytes = amd_bytes;
-                codeSize = amd_stub_size;
+                code_size = amd_stub_size;
             }
         }
 
         if (proceed) {
             PVOID base = nullptr;
-            SIZE_T sz = codeSize;
+            SIZE_T sz = code_size;
             NTSTATUS st2 = nt_allocate_virtual_memory(current_process, &base, 0, &sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
             if (NT_SUCCESS(st2) && base != nullptr) {
                 exec_mem = base;
-                memcpy(exec_mem, bytes, codeSize);
+                memcpy(exec_mem, bytes, code_size);
 
                 /* Change to RX */
-                ULONG oldProt = 0;
+                ULONG old_protection = 0;
                 PVOID tmp_base = exec_mem;
-                SIZE_T tmp_sz = codeSize;
-                st2 = nt_protect_virtual_memory(current_process, &tmp_base, &tmp_sz, PAGE_EXECUTE_READ, &oldProt);
+                SIZE_T tmp_sz = code_size;
+                st2 = nt_protect_virtual_memory(current_process, &tmp_base, &tmp_sz, PAGE_EXECUTE_READ, &old_protection);
                 if (NT_SUCCESS(st2)) {
-                    nt_flush_instruction_cache(current_process, exec_mem, codeSize);
+                    nt_flush_instruction_cache(current_process, exec_mem, code_size);
 
                     using code_func = void(*)();
                     using runner_func = u8(*)(code_func);
@@ -12592,40 +12592,44 @@ public:
                 const wchar_t* p = wptr;
                 while (*p) {
                     /* Check for "VEN_" (case-insensitive) */
-                    if (((p[0] | 0x20) == L'v') &&
-                        ((p[1] | 0x20) == L'e') &&
-                        ((p[2] | 0x20) == L'n') &&
-                        (p[3] == L'_')) {
+                    if (p[0] != L'\0' && p[1] != L'\0' && p[2] != L'\0' && p[3] != L'\0') {
+                        if (((p[0] | 0x20) == L'v') &&
+                            ((p[1] | 0x20) == L'e') &&
+                            ((p[2] | 0x20) == L'n') &&
+                            (p[3] == L'_')) {
 
-                        const wchar_t* q = p + 4;
-                        u32 val = 0;
-                        int got = 0;
-                        while (got < 4 && *q) {
-                            const wchar_t c = *q;
-                            u32 nib = 0;
-                            if (c >= L'0' && c <= L'9') 
-                                nib = static_cast<u32>(c - L'0');
-                            else if ((c | 0x20) >= L'a' && (c | 0x20) <= L'f') 
-                                nib = static_cast<u32>((c | 0x20) - L'a' + 10);
-                            else
-                                break;
+                            const wchar_t* q = p + 4;
+                            u32 val = 0;
+                            int got = 0;
+                            while (got < 4 && *q) {
+                                const wchar_t c = *q;
+                                u32 nib = 0;
+                                if (c >= L'0' && c <= L'9')
+                                    nib = static_cast<u32>(c - L'0');
+                                else if ((c | 0x20) >= L'a' && (c | 0x20) <= L'f')
+                                    nib = static_cast<u32>((c | 0x20) - L'a' + 10);
+                                else
+                                    break;
 
-                            val = (val << 4) | nib;
-                            ++got; ++q;
+                                val = (val << 4) | nib;
+                                ++got; ++q;
+                            }
+                            if (got == 4) return val;
                         }
-                        if (got == 4) return val;
                     }
                     ++p;
                 }
                 return 0;
             };
 
-            /* Setupapi stuff */
+            /* SetupAPI stuff */
             int intel_hits = 0;
             int amd_hits = 0;
 
             wchar_t stack_buf[1024]{};
+            stack_buf[ARRAYSIZE(stack_buf) - 1] = L'\0';
             std::vector<BYTE> heap_buf; /* fallback for rare huge strings */
+            heap_buf.push_back(0);
 
             auto scan_devices = [&](const GUID* classGuid, DWORD flags) noexcept {
                 HDEVINFO handle_dev_info = SetupDiGetClassDevsW(classGuid, nullptr, nullptr, flags);
@@ -13045,7 +13049,8 @@ public:
             "NtCreateThreadEx",
             "NtWaitForSingleObject",
             "NtClose",
-            "NtSetInformationThread"
+            "NtSetInformationThread",
+            "NtFlushInstructionCache"
         };
         void* functions[ARRAYSIZE(function_names)] = {};
         memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
@@ -13062,6 +13067,7 @@ public:
         using nt_wait_for_single_object_fn = NTSTATUS(__stdcall*)(HANDLE, BOOLEAN, PLARGE_INTEGER);
         using nt_close_fn = NTSTATUS(__stdcall*)(HANDLE);
         using nt_set_information_thread_fn = NTSTATUS(__stdcall*)(HANDLE, ULONG, PVOID, ULONG);
+        using nt_flush_instruction_cache_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID, SIZE_T);
 
         /* Volatile ensures these are loaded from stack after SEH unwind when compiled with aggressive optimizations */
         nt_allocate_virtual_memory_fn volatile nt_allocate_virtual_memory = reinterpret_cast<nt_allocate_virtual_memory_fn>(functions[0]);
@@ -13071,17 +13077,18 @@ public:
         rtl_add_vectored_exception_handler_fn volatile rtl_add_vectored_exception_handler = reinterpret_cast<rtl_add_vectored_exception_handler_fn>(functions[4]);
         rtl_remove_vectored_exception_handler_fn volatile rtl_remove_vectored_exception_handler = reinterpret_cast<rtl_remove_vectored_exception_handler_fn>(functions[5]);
         nt_protect_virtual_memory_fn volatile nt_protect_virtual_memory = reinterpret_cast<nt_protect_virtual_memory_fn>(functions[6]);
-
         nt_query_system_information_fn volatile nt_query_system_information = reinterpret_cast<nt_query_system_information_fn>(functions[7]);
         nt_create_thread_ex_fn volatile nt_create_thread_ex = reinterpret_cast<nt_create_thread_ex_fn>(functions[8]);
         nt_wait_for_single_object_fn volatile nt_wait_for_single_object = reinterpret_cast<nt_wait_for_single_object_fn>(functions[9]);
         nt_close_fn volatile nt_close = reinterpret_cast<nt_close_fn>(functions[10]);
         nt_set_information_thread_fn volatile nt_set_information_thread = reinterpret_cast<nt_set_information_thread_fn>(functions[11]);
+        nt_flush_instruction_cache_fn volatile nt_flush_instruction_cache = reinterpret_cast<nt_flush_instruction_cache_fn>(functions[12]);
 
         if (!nt_allocate_virtual_memory || !nt_free_virtual_memory || !nt_get_context_thread ||
             !nt_set_context_thread || !rtl_add_vectored_exception_handler || !rtl_remove_vectored_exception_handler ||
             !nt_protect_virtual_memory || !nt_query_system_information || !nt_create_thread_ex ||
-            !nt_wait_for_single_object || !nt_close || !nt_set_information_thread) {
+            !nt_wait_for_single_object || !nt_close || !nt_set_information_thread || 
+            !nt_flush_instruction_cache) {
             return false;
         }
 
@@ -13164,6 +13171,7 @@ public:
         if (status < 0) return false;
 
         *static_cast<volatile u8*>(pointer) = 0xC3;
+        nt_flush_instruction_cache(current_process, const_cast<void*>(pointer), 1);
 
         base_address = pointer;
         prot_region_size = 1;
@@ -13384,6 +13392,9 @@ public:
     #pragma pack(pop)
 
         if (util::is_x86_process_on_arm()) {
+            return false;
+        }
+        if (util::is_32bit_execution_disabled()) { /* People may uninstall the WOW64 subsystem */
             return false;
         }
 
@@ -13714,7 +13725,7 @@ public:
 
                 bool parse_error = false;
                 for (u32 i = 0; i < digest_count; ++i) {
-                    if (total_size - (current_offset + local_offset) < 2) {
+                    if (current_offset + local_offset > total_size || total_size - (current_offset + local_offset) < 2) {
                         parse_error = true;
                         break;
                     }
@@ -13769,7 +13780,7 @@ public:
             return false;
         };
 
-        const HMODULE tbs = LoadLibraryW(L"tbs.dll");
+        const HMODULE tbs = LoadLibraryExW(L"tbs.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (tbs == nullptr) {
             return false;
         }
@@ -13782,7 +13793,7 @@ public:
         };
         void* functions[ARRAYSIZE(function_names)] = {};
 
-        memory::get_function_address(tbs, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function_address(tbs, function_names, functions, ARRAYSIZE(function_names), false);
 
         tbsi_get_tcg_log_ex_fn tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_fn>(functions[0]);
         tbsi_context_create_fn tbsi_context_create = reinterpret_cast<tbsi_context_create_fn>(functions[1]);
@@ -14012,14 +14023,8 @@ public:
             }
         };
 
-        bcrypt_dll = LoadLibraryW(L"bcrypt.dll");
+        bcrypt_dll = LoadLibraryExW(L"bcrypt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!bcrypt_dll) {
-            return false;
-        }
-
-        tbs_dll = LoadLibraryW(L"tbs.dll");
-        if (!tbs_dll) {
-            free_resources();
             return false;
         }
 
@@ -14033,7 +14038,7 @@ public:
             "BCryptCloseAlgorithmProvider"
         };
         void* bcrypt_funcs[7] = { nullptr };
-        memory::get_function_address(bcrypt_dll, bcrypt_names, bcrypt_funcs, 7);
+        memory::get_function_address(bcrypt_dll, bcrypt_names, bcrypt_funcs, 7, false);
 
         p_bcrypt_open_algorithm_provider = reinterpret_cast<bcrypt_open_algorithm_provider_t>(bcrypt_funcs[0]);
         p_bcrypt_get_property = reinterpret_cast<bcrypt_get_property_t>(bcrypt_funcs[1]);
@@ -14068,6 +14073,12 @@ public:
             return false;
         }
 
+        tbs_dll = LoadLibraryExW(L"tbs.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!tbs_dll) {
+            free_resources();
+            return false;
+        }
+
         const char* tbs_names[] = {
             "Tbsi_Context_Create",
             "Tbsi_Get_TCG_Log_Ex",
@@ -14075,7 +14086,7 @@ public:
             "Tbsip_Context_Close"
         };
         void* tbs_funcs[4] = { nullptr };
-        memory::get_function_address(tbs_dll, tbs_names, tbs_funcs, 4);
+        memory::get_function_address(tbs_dll, tbs_names, tbs_funcs, 4, false);
 
         p_tbsi_context_create = reinterpret_cast<tbsi_context_create_t>(tbs_funcs[0]);
         p_tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_t>(tbs_funcs[1]);
@@ -14102,6 +14113,10 @@ public:
         };
 
         auto read_tpm_pcr = [&](const TBS_HCONTEXT h_context, const u32 pcr_index, const u16 alg_id, u8* const VMAWARE_RESTRICT out_digest, u32* const VMAWARE_RESTRICT out_digest_size) noexcept -> bool {
+            if (pcr_index >= 24) {
+                return false;
+            }
+
             u8 cmd[20] = { 0 };
             cmd[0] = 0x80; cmd[1] = 0x01;
             cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0x00; cmd[5] = 0x14;
@@ -14615,12 +14630,10 @@ public:
             VMAWARE_ASSUME(p_brand <= brand_enum::NULL_BRAND); /* If we maintain the invariant that the parameters are always valid brand_enum values */
 
             const u8 p_idx = static_cast<u8>(p_brand);
-            if (p_idx < MAX_BRANDS) {
-                brand_scoreboard[p_idx].score++;
-            }
-
+            brand_scoreboard[p_idx].score++;
+            
             const u8 e_idx = static_cast<u8>(extra_brand);
-            if (extra_brand != brand_enum::NULL_BRAND && e_idx < MAX_BRANDS) {
+            if (extra_brand != brand_enum::NULL_BRAND) {
                 brand_scoreboard[e_idx].score++;
             }
 
@@ -15188,7 +15201,7 @@ public:
         if (VMAWARE_UNLIKELY(percent > 100)) {
             throw_error("Percentage parameter must be between 0 and 100");
         }
-        VMAWARE_ASSUME(percent <= 100);
+        /* VMAWARE_ASSUME(percent <= 100); */
 
         const size_t current_index = core::custom_table.size();
 
@@ -15801,7 +15814,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
             {VM::HWMON, {35, VM::hwmon}},
             {VM::LINUX_USER_HOST, {10, VM::linux_user_host}},
             {VM::QEMU_VIRTUAL_DMI, {40, VM::qemu_virtual_dmi}},
-            {VM::QEMU_USB, {20, VM::qemu_USB}},
+            {VM::QEMU_USB, {20, VM::qemu_usb}},
             {VM::HYPERVISOR_DIR, {20, VM::hypervisor_dir}},
             {VM::UML_CPU, {80, VM::uml_cpu}},
             {VM::VBOX_MODULE, {15, VM::vbox_module}},
