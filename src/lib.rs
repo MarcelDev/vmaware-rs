@@ -107,7 +107,7 @@ impl std::fmt::Display for VmType {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     fn vmaware_detect(out: *mut bool, err: *mut *mut c_char) -> bool;
     fn vmaware_check(flag: u8, out: *mut bool, err: *mut *mut c_char) -> bool;
     fn vmaware_type(out: *mut *mut c_char, err: *mut *mut c_char) -> bool;
@@ -123,8 +123,8 @@ unsafe fn take_ffi_string(ptr: *mut c_char) -> Option<String> {
     if ptr.is_null() {
         None
     } else {
-        let s = CStr::from_ptr(ptr).to_string_lossy().into_owned();
-        free_string(ptr);
+        let s = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned();
+        unsafe { free_string(ptr) };
         Some(s)
     }
 }
