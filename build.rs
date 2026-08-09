@@ -8,7 +8,7 @@ fn main() {
         .include("src") 
         .file("src/wrapper.cpp");
 
-    build.flag_if_supported("-std=c++11");
+    build.flag_if_supported("-std=c++20");
 
     build.compile("vmaware-bridge");
 
@@ -16,7 +16,7 @@ fn main() {
         .header("deps/vmaware.hpp")
         .clang_arg("-x")
         .clang_arg("c++")
-        .clang_arg("-std=c++11") 
+        .clang_arg("-std=c++20") 
         .allowlist_type("VM_enum_flags")
         .allowlist_type("VM_brand_enum")
         .allowlist_var("VM_technique_count")
