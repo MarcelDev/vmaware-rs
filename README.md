@@ -16,7 +16,7 @@ vmaware = { git = "https://github.com/MarcelDev/vmaware-rs" }
 ```
 
 ```rust
-use vmaware::{detect, brand, vm_type, conclusion, percentage, detected_count, is_hardened, check, flags};
+use vmaware::{detect, brand, vm_type, conclusion, percentage, detected_count, check, flags};
 
 fn main() -> Result<(), vmaware::VmawareError> {
     println!("is vm: {}", detect()?);
@@ -25,7 +25,6 @@ fn main() -> Result<(), vmaware::VmawareError> {
     println!("conclusion: {}", conclusion()?);
     println!("percentage: {}%", percentage()?);
     println!("detected techniques: {}", detected_count()?);
-    println!("hardened: {}", is_hardened()?);
 
     // check a single technique
     if check(flags::HYPERVISOR_BIT)? {
