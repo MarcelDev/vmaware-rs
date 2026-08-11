@@ -1370,7 +1370,7 @@ public:
 
         static void get_intel_core_db(const cpu_entry*& out_ptr, size_t& out_size) noexcept {
             static constexpr cpu_entry db[] = {
-                /* I3 series */
+                /* i3 series */
                 { "i3-1000G1", 4, true },
                 { "i3-1000G4", 4, true },
                 { "i3-1000NG4", 4, true },
@@ -1596,7 +1596,7 @@ public:
                 { "i3-N300", 8, false },
                 { "i3-N305", 8, false },
 
-                /* I5 series */
+                /* i5 series */
                 { "i5-10200H", 8, true },
                 { "i5-10210U", 8, true },
                 { "i5-10210Y", 8, true },
@@ -1956,7 +1956,7 @@ public:
                 { "i5-14600KF", 20, true },
                 { "i5-14600T", 20, true },
 
-                /* I7 series */
+                /* i7 series */
                 { "i7-10510U", 8, true },
                 { "i7-10510Y", 8, true },
                 { "i7-1060G7", 8, true },
@@ -2296,7 +2296,7 @@ public:
                 { "i7-14790F", 24, true },
                 { "i7-14950HX", 24, true },
 
-                /* I9 series */
+                /* i9 series */
                 { "i9-7900X", 20, true },
                 { "i9-7920X", 24, true },
                 { "i9-7940X", 28, true },
@@ -4841,6 +4841,16 @@ public:
             if (out_manufacturer) *out_manufacturer = "";
             if (out_model) *out_model = "";
 
+            if (memo::bios_info::is_cached()) {
+                const char* man = memo::bios_info::fetch_manufacturer();
+                const char* mod = memo::bios_info::fetch_model();
+
+                if (out_manufacturer) *out_manufacturer = man;
+                if (out_model) *out_model = mod;
+
+                return (man && man[0] != '\0') || (mod && mod[0] != '\0');
+            }
+
             auto is_placeholder = [](const char* s) noexcept -> bool {
                 if (!s || !*s) {
                     return true;
@@ -4896,16 +4906,6 @@ public:
                 out[out_size - 1] = '\0';
                 return true;
             };
-
-            if (memo::bios_info::is_cached()) {
-                const char* man = memo::bios_info::fetch_manufacturer();
-                const char* mod = memo::bios_info::fetch_model();
-
-                if (out_manufacturer) *out_manufacturer = man;
-                if (out_model) *out_model = mod;
-
-                return !is_placeholder(man) || !is_placeholder(mod);
-            }
 
             char man_tmp[sizeof(memo::bios_info::manufacturer)]{};
             char model_tmp[sizeof(memo::bios_info::model)]{};
@@ -6156,10 +6156,13 @@ public:
         /* Calculation of minimum threshold for instrution latency */
         double threshold = 2.5;
         bool check_nested_hypervisors = false;
+        bool serialize_available = cpu::is_intel();
+
         if (util::hyper_x() == HYPERV_HOST) {
             debug("TIMER: Hyper-V detected, running nested checks");
-            threshold = 75.0;
             check_nested_hypervisors = true;
+            if (serialize_available)    threshold = 12.0;
+            else                        threshold = 25.0;
         }
         #if (x86_32)
             VMAWARE_UNUSED(check_nested_hypervisors);
@@ -6221,7 +6224,6 @@ public:
             #undef TICK8
         };
 
-        bool serialize_available = cpu::is_intel();
         if (serialize_available) {
             /* SERIALIZE requires Ice Lake or newer */
             u32 l7_eax = 0, l7_ebx = 0, l7_ecx = 0, l7_edx = 0;
@@ -6497,7 +6499,7 @@ public:
 
                     r_pre = *counter_ptr;
                     std::atomic_signal_fence(std::memory_order_acq_rel);
-                    _serialize(); _serialize(); _serialize(); /* first serialize is slower because of having to deal with the pipeline, subsequent only pay the architectural cost of the serialization itself */
+                    _serialize(); /* first serialize is slower because of having to deal with the pipeline, subsequent only pay the architectural cost of the serialization itself */
                     std::atomic_signal_fence(std::memory_order_acq_rel);
                     r_post = *counter_ptr;
 
@@ -8190,13 +8192,10 @@ public:
         static_assert(targets.size() == brands_map.size(), "FIRMWARE: The target string array size must match the brands mapping array size.");
 
         /* Track cross-table validation parameters sequentially across buffers */
-        bool is_mobile = false;
-        bool has_battery = false;
-        bool has_thermal_zone = false;
         bool dsdt_scanned = false;
         char dsdt_oem_id[7] = { 0 };
 
-        auto scan_buffer = [&](const u8* buffer, const size_t buffer_len) noexcept -> bool {
+        auto scan_buffer = [&](const u8* buffer, const size_t buffer_len, const bool is_acpi) noexcept -> bool {
             auto find_pattern = [&](const char* pattern, size_t pattern_len) noexcept -> bool {
                 if (pattern_len == 0 || pattern_len > buffer_len) return false;
                 const u8 first_byte = static_cast<u8>(pattern[0]);
@@ -8218,200 +8217,186 @@ public:
                 return false;
             };
 
-            if (!buffer || buffer_len < sizeof(acpi_header)) {
+            if (!buffer) {
                 return false;
             }
 
             acpi_header header;
-            memcpy(&header, buffer, sizeof(header));
+            if (is_acpi) {
+                if (buffer_len < sizeof(acpi_header)) {
+                    return false;
+                }
+                memcpy(&header, buffer, sizeof(header));
 
-            /* Identify and record DSDT size and OEM details */
-            if (memcmp(header.signature, "DSDT", 4) == 0) {
-                dsdt_scanned = true;
-                memcpy(dsdt_oem_id, header.oem_id, 6);
-                dsdt_oem_id[6] = '\0';
-            }
-
-            /* 1) AML Bytecode inspection */
-            {
-                /*
-                 * OperationRegion (DBG, SystemIO, 0x0402, One)
-                 * AML byte sequence: ExtOpPrefix (0x5B), OpRegionOp (0x80), 'D', 'B', 'G', '_' (0x5F padding), SystemIO (0x01), WordPrefix (0x0B), 0x02, 0x04, One (0x01)
-                 */
-                constexpr u8 qemu_dbg_opregion[] = { 0x5B, 0x80, 0x44, 0x42, 0x47, 0x5F, 0x01, 0x0B, 0x02, 0x04, 0x01 };
-                if (find_pattern(reinterpret_cast<const char*>(qemu_dbg_opregion), sizeof(qemu_dbg_opregion))) {
-                    debug("FIRMWARE: Detected QEMU Debug Port OperationRegion at I/O 0x0402");
-                    return core::add(brand_enum::QEMU);
+                /* Identify and record DSDT size and OEM details */
+                if (memcmp(header.signature, "DSDT", 4) == 0) {
+                    dsdt_scanned = true;
+                    memcpy(dsdt_oem_id, header.oem_id, 6);
+                    dsdt_oem_id[6] = '\0';
                 }
 
-            #if (WINDOWS)
-                /* Alternate QEMU Debug Port: matching "DBUG" method and "DBGB" field definitions together */
-                if (find_pattern("DBUG", 4) && find_pattern("DBGB", 4)) {
-                    const char* man = nullptr;
-                    const char* mod = nullptr;
-                    bool is_acer_aspire = false;
-
-                    if (util::get_manufacturer_model(&man, &mod)) {
-                        auto str_contains = [](const char* haystack, const char* needle) noexcept -> bool {
-                            if (!haystack || !needle) return false;
-                            const size_t h_len = strlen(haystack);
-                            const size_t n_len = strlen(needle);
-                            if (n_len > h_len) return false;
-                            for (size_t i = 0; i <= h_len - n_len; ++i) {
-                                size_t j = 0;
-                                for (; j < n_len; ++j) {
-                                    char hc = haystack[i + j];
-                                    char nc = needle[j];
-                                    if (hc >= 'A' && hc <= 'Z') hc += 32;
-                                    if (nc >= 'A' && nc <= 'Z') nc += 32;
-                                    if (hc != nc) break;
-                                }
-                                if (j == n_len) return true;
-                            }
-                            return false;
-                        };
-
-                        if (str_contains(man, "Acer") && str_contains(mod, "Aspire")) {
-                            is_acer_aspire = true;
-                        }
-                    }
-
-                    if (!is_acer_aspire) {
-                        debug("FIRMWARE: Detected QEMU DBUG method and DBGB field definitions");
+                /* 1) AML Bytecode inspection */
+                {
+                    /*
+                     * OperationRegion (DBG, SystemIO, 0x0402, One)
+                     * AML byte sequence: ExtOpPrefix (0x5B), OpRegionOp (0x80), 'D', 'B', 'G', '_' (0x5F padding), SystemIO (0x01), WordPrefix (0x0B), 0x02, 0x04, One (0x01)
+                     */
+                    constexpr u8 qemu_dbg_opregion[] = { 0x5B, 0x80, 0x44, 0x42, 0x47, 0x5F, 0x01, 0x0B, 0x02, 0x04, 0x01 };
+                    if (find_pattern(reinterpret_cast<const char*>(qemu_dbg_opregion), sizeof(qemu_dbg_opregion))) {
+                        debug("FIRMWARE: Detected QEMU Debug Port OperationRegion at I/O 0x0402");
                         return core::add(brand_enum::QEMU);
                     }
-                }
-            #endif
 
-                /* QEMU virtual DRAM Controller named "DRAC" with its corresponding System Board PNPID */
-                if (find_pattern("DRAC", 4) && find_pattern("PNP0C01", 7)) {
-                    debug("FIRMWARE: Detected QEMU virtual DRAM controller (DRAC)");
-                    return core::add(brand_enum::QEMU);
-                }
+                #if (WINDOWS)
+                    /* Alternate QEMU Debug Port: matching "DBUG" method and "DBGB" field definitions together */
+                    if (find_pattern("DBUG", 4) && find_pattern("DBGB", 4)) {
+                        const char* man = nullptr;
+                        const char* mod = nullptr;
+                        bool is_acer_aspire = false;
 
-                /* QEMU System Management Interrupt Resources Reservation string */
-                if (find_pattern("SMI resources", 13)) {
-                    debug("FIRMWARE: Detected QEMU SMI Resources reservation string");
-                    return core::add(brand_enum::QEMU);
-                }
+                        if (util::get_manufacturer_model(&man, &mod)) {
+                            auto str_contains = [](const char* haystack, const char* needle) noexcept -> bool {
+                                if (!haystack || !needle) return false;
+                                const size_t h_len = strlen(haystack);
+                                const size_t n_len = strlen(needle);
+                                if (n_len > h_len) return false;
+                                for (size_t i = 0; i <= h_len - n_len; ++i) {
+                                    size_t j = 0;
+                                    for (; j < n_len; ++j) {
+                                        char hc = haystack[i + j];
+                                        char nc = needle[j];
+                                        if (hc >= 'A' && hc <= 'Z') hc += 32;
+                                        if (nc >= 'A' && nc <= 'Z') nc += 32;
+                                        if (hc != nc) break;
+                                    }
+                                    if (j == n_len) return true;
+                                }
+                                return false;
+                                };
 
-                /* QEMU Hotplug Resource Description strings */
-                if (find_pattern("CPU Hotplug resources", 21)) {
-                    debug("FIRMWARE: Detected QEMU CPU Hotplug resources string");
-                    return core::add(brand_enum::QEMU);
-                }
-                if (find_pattern("PCI Hotplug resources", 21)) {
-                    debug("FIRMWARE: Detected QEMU PCI Hotplug resources string");
-                    return core::add(brand_enum::QEMU);
-                }
-
-                /* Battery check flag tracking (ACPI Control Method Battery device ID) */
-                if (find_pattern("PNP0C0A", 7)) {
-                    has_battery = true;
-                }
-
-                /* Thermal zone existence flag tracking (AML scope mapping for \_TZ or standard identifier) */
-                constexpr u8 tz_scope_aml[] = { 0x5C, 0x5F, 0x54, 0x5A }; // \_TZ in AML
-                if (find_pattern(reinterpret_cast<const char*>(tz_scope_aml), sizeof(tz_scope_aml)) || find_pattern("_TZ_", 4)) {
-                    has_thermal_zone = true;
-                }
-
-                /* PRTP and PRTA 128-element routing mapping */
-                const u8* prtp_ptr = static_cast<const u8*>(memchr(buffer, 'P', buffer_len));
-                while (prtp_ptr) {
-                    const size_t offset = static_cast<size_t>(prtp_ptr - buffer);
-                    if (offset + 10 <= buffer_len && memcmp(prtp_ptr, "PRTP", 4) == 0) {
-                        if (offset >= 1 && *(prtp_ptr - 1) == 0x08 && prtp_ptr[4] == 0x12) {
-                            bool found_128 = false;
-                            for (size_t k = 5; k < 10 && offset + k < buffer_len; ++k) {
-                                if (prtp_ptr[k] == 0x80) { found_128 = true; break; }
+                            if (str_contains(man, "Acer") && str_contains(mod, "Aspire")) {
+                                is_acer_aspire = true;
                             }
-                            if (found_128) {
-                                const u8* prta_ptr = static_cast<const u8*>(memchr(buffer, 'P', buffer_len));
-                                while (prta_ptr) {
-                                    const size_t prta_offset = static_cast<size_t>(prta_ptr - buffer);
-                                    if (prta_offset + 10 <= buffer_len && memcmp(prta_ptr, "PRTA", 4) == 0) {
-                                        if (prta_offset >= 1 && *(prta_ptr - 1) == 0x08 && prta_ptr[4] == 0x12) {
-                                            for (size_t j = 5; j < 10 && prta_offset + j < buffer_len; ++j) {
-                                                if (prta_ptr[j] == 0x80) {
-                                                    debug("FIRMWARE: Detected QEMU 128-element PRTP and PRTA routing tables");
-                                                    return core::add(brand_enum::QEMU);
+                        }
+
+                        if (!is_acer_aspire) {
+                            debug("FIRMWARE: Detected QEMU DBUG method and DBGB field definitions");
+                            return core::add(brand_enum::QEMU);
+                        }
+                    }
+                #endif
+
+                    /* QEMU virtual DRAM Controller named "DRAC" with its corresponding System Board PNPID */
+                    if (find_pattern("DRAC", 4) && find_pattern("PNP0C01", 7)) {
+                        debug("FIRMWARE: Detected QEMU virtual DRAM controller (DRAC)");
+                        return core::add(brand_enum::QEMU);
+                    }
+
+                    /* QEMU System Management Interrupt Resources Reservation string */
+                    if (find_pattern("SMI resources", 13)) {
+                        debug("FIRMWARE: Detected QEMU SMI Resources reservation string");
+                        return core::add(brand_enum::QEMU);
+                    }
+
+                    /* QEMU Hotplug Resource Description strings */
+                    if (find_pattern("CPU Hotplug resources", 21)) {
+                        debug("FIRMWARE: Detected QEMU CPU Hotplug resources string");
+                        return core::add(brand_enum::QEMU);
+                    }
+                    if (find_pattern("PCI Hotplug resources", 21)) {
+                        debug("FIRMWARE: Detected QEMU PCI Hotplug resources string");
+                        return core::add(brand_enum::QEMU);
+                    }
+
+                    /* PRTP and PRTA 128-element routing mapping */
+                    const u8* prtp_ptr = static_cast<const u8*>(memchr(buffer, 'P', buffer_len));
+                    while (prtp_ptr) {
+                        const size_t offset = static_cast<size_t>(prtp_ptr - buffer);
+                        if (offset + 10 <= buffer_len && memcmp(prtp_ptr, "PRTP", 4) == 0) {
+                            if (offset >= 1 && *(prtp_ptr - 1) == 0x08 && prtp_ptr[4] == 0x12) {
+                                bool found_128 = false;
+                                for (size_t k = 5; k < 10 && offset + k < buffer_len; ++k) {
+                                    if (prtp_ptr[k] == 0x80) { found_128 = true; break; }
+                                }
+                                if (found_128) {
+                                    const u8* prta_ptr = static_cast<const u8*>(memchr(buffer, 'P', buffer_len));
+                                    while (prta_ptr) {
+                                        const size_t prta_offset = static_cast<size_t>(prta_ptr - buffer);
+                                        if (prta_offset + 10 <= buffer_len && memcmp(prta_ptr, "PRTA", 4) == 0) {
+                                            if (prta_offset >= 1 && *(prta_ptr - 1) == 0x08 && prta_ptr[4] == 0x12) {
+                                                for (size_t j = 5; j < 10 && prta_offset + j < buffer_len; ++j) {
+                                                    if (prta_ptr[j] == 0x80) {
+                                                        debug("FIRMWARE: Detected QEMU 128-element PRTP and PRTA routing tables");
+                                                        return core::add(brand_enum::QEMU);
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                    if (prta_offset + 1 < buffer_len) {
-                                        prta_ptr = static_cast<const u8*>(memchr(prta_ptr + 1, 'P', buffer_len - (prta_offset + 1)));
-                                    }
-                                    else {
-                                        prta_ptr = nullptr;
+                                        if (prta_offset + 1 < buffer_len) {
+                                            prta_ptr = static_cast<const u8*>(memchr(prta_ptr + 1, 'P', buffer_len - (prta_offset + 1)));
+                                        }
+                                        else {
+                                            prta_ptr = nullptr;
+                                        }
                                     }
                                 }
                             }
                         }
+                        if (offset + 1 < buffer_len) {
+                            prtp_ptr = static_cast<const u8*>(memchr(prtp_ptr + 1, 'P', buffer_len - (offset + 1)));
+                        }
+                        else {
+                            prtp_ptr = nullptr;
+                        }
                     }
-                    if (offset + 1 < buffer_len) {
-                        prtp_ptr = static_cast<const u8*>(memchr(prtp_ptr + 1, 'P', buffer_len - (offset + 1)));
-                    }
-                    else {
-                        prtp_ptr = nullptr;
-                    }
-                }
 
-                /* HPET dynamic check logic (VEND / PRD threshold) */
-                if (find_pattern("HPET", 4)) {
-                    constexpr u8 hpet_mmio[] = { 0x0C, 0x00, 0x00, 0xD0, 0xFE }; // 0x0C (DWordPrefix) followed by 0xFED00000
-                    constexpr u8 hpet_threshold[] = { 0x0C, 0x00, 0xE1, 0xF5, 0x05 }; // 0x0C (DWordPrefix) followed by 0x05F5E100 (100,000,000)
-                    if (find_pattern(reinterpret_cast<const char*>(hpet_mmio), sizeof(hpet_mmio)) &&
-                        find_pattern(reinterpret_cast<const char*>(hpet_threshold), sizeof(hpet_threshold))) {
-                        debug("FIRMWARE: Detected QEMU dynamic HPET validation checks");
+                    /* HPET dynamic check logic (VEND / PRD threshold) */
+                    if (find_pattern("HPET", 4)) {
+                        constexpr u8 hpet_mmio[] = { 0x0C, 0x00, 0x00, 0xD0, 0xFE }; // 0x0C (DWordPrefix) followed by 0xFED00000
+                        constexpr u8 hpet_threshold[] = { 0x0C, 0x00, 0xE1, 0xF5, 0x05 }; // 0x0C (DWordPrefix) followed by 0x05F5E100 (100,000,000)
+                        if (find_pattern(reinterpret_cast<const char*>(hpet_mmio), sizeof(hpet_mmio)) &&
+                            find_pattern(reinterpret_cast<const char*>(hpet_threshold), sizeof(hpet_threshold))) {
+                            debug("FIRMWARE: Detected QEMU dynamic HPET validation checks");
+                            return core::add(brand_enum::QEMU);
+                        }
+                    }
+
+                    /* CPU/PCI Hotplug synthetic I/O ranges (Prefixed with 0x0B WordPrefix to confirm actual I/O word sizing) */
+                    constexpr u8 cpu_hotplug_io[] = { 0x0B, 0xD8, 0x0C }; // 0x0B (WordPrefix) followed by 0x0CD8
+                    constexpr u8 pci_hotplug_io1[] = { 0x0B, 0xE0, 0xAF }; // 0x0B (WordPrefix) followed by 0xAFE0
+                    constexpr u8 pci_hotplug_io2[] = { 0x0B, 0x00, 0xAE }; // 0x0B (WordPrefix) followed by 0xAE00
+                    if (find_pattern(reinterpret_cast<const char*>(cpu_hotplug_io), sizeof(cpu_hotplug_io)) ||
+                        (find_pattern(reinterpret_cast<const char*>(pci_hotplug_io1), sizeof(pci_hotplug_io1)) &&
+                            find_pattern(reinterpret_cast<const char*>(pci_hotplug_io2), sizeof(pci_hotplug_io2)))) {
+                        debug("FIRMWARE: Detected QEMU CPU/PCI synthetic hotplug I/O ports");
                         return core::add(brand_enum::QEMU);
                     }
-                }
 
-                /* Flat CPU declarations with missing power-management methods */
-                if (find_pattern("PR00", 4) && find_pattern("PR01", 4) && find_pattern("PR02", 4)) {
-                    if (!find_pattern("_PSS", 4) && !find_pattern("_CST", 4) && !find_pattern("_CPC", 4)) {
-                        debug("FIRMWARE: Flat processor topology with missing power-management methods");
+                    /* QEMU PIRQ Routing rotation names */
+                    if (find_pattern("LNKE", 4) && find_pattern("LNKH", 4) && find_pattern("GSIE", 4) && find_pattern("GSIH", 4)) {
+                        debug("FIRMWARE: Detected QEMU sequential PIRQ routing names (LNKE-H, GSIE-H)");
                         return core::add(brand_enum::QEMU);
                     }
-                }
 
-                /* CPU/PCI Hotplug synthetic I/O ranges (Prefixed with 0x0B WordPrefix to confirm actual I/O word sizing) */
-                constexpr u8 cpu_hotplug_io[] = { 0x0B, 0xD8, 0x0C }; // 0x0B (WordPrefix) followed by 0x0CD8
-                constexpr u8 pci_hotplug_io1[] = { 0x0B, 0xE0, 0xAF }; // 0x0B (WordPrefix) followed by 0xAFE0
-                constexpr u8 pci_hotplug_io2[] = { 0x0B, 0x00, 0xAE }; // 0x0B (WordPrefix) followed by 0xAE00
-                if (find_pattern(reinterpret_cast<const char*>(cpu_hotplug_io), sizeof(cpu_hotplug_io)) ||
-                    (find_pattern(reinterpret_cast<const char*>(pci_hotplug_io1), sizeof(pci_hotplug_io1)) &&
-                        find_pattern(reinterpret_cast<const char*>(pci_hotplug_io2), sizeof(pci_hotplug_io2)))) {
-                    debug("FIRMWARE: Detected QEMU CPU/PCI synthetic hotplug I/O ports");
-                    return core::add(brand_enum::QEMU);
-                }
-
-                /* QEMU PIRQ Routing rotation names */
-                if (find_pattern("LNKE", 4) && find_pattern("LNKH", 4) && find_pattern("GSIE", 4) && find_pattern("GSIH", 4)) {
-                    debug("FIRMWARE: Detected QEMU sequential PIRQ routing names (LNKE-H, GSIE-H)");
-                    return core::add(brand_enum::QEMU);
-                }
-
-                /* Motherboard resources mapped via PNP0A06 generic container on designated "GPER" virtual device */
-                if (find_pattern("GPER", 4) && find_pattern("PNP0A06", 7)) {
-                    debug("FIRMWARE: Motherboard resources allocated via PNP0A06 generic container");
-                    return core::add(brand_enum::QEMU);
-                }
-
-                /* QEMU dummy SATA controller named D0FA on Device 31, Function 2 */
-                constexpr u8 sata_addr_dummy[] = { 0x08, 0x5F, 0x41, 0x44, 0x52, 0x0C, 0x02, 0x00, 0x1F, 0x00 };
-                if (find_pattern("D0FA", 4) && find_pattern(reinterpret_cast<const char*>(sata_addr_dummy), sizeof(sata_addr_dummy))) {
-                    debug("FIRMWARE: Detected QEMU dummy SATA controller named D0FA on Device 31, Function 2");
-                    return core::add(brand_enum::QEMU);
-                }
-
-                /* Real ICH9 contains multiple USB controllers (EHC1/EHC2, UHC1-UHC6). Here I put XHC to match XHC, XHC_, XHC1, or XHCI */
-                if (find_pattern("LNKE", 4) && find_pattern("LNKH", 4)) {
-                    if (!find_pattern("EHC1", 4) && !find_pattern("EHC2", 4) && !find_pattern("UHC1", 4) && !find_pattern("XHC", 3)) { 
-                        debug("FIRMWARE: Detected Q35 emulation footprint with complete absence of USB controller declarations");
+                    /* Motherboard resources mapped via PNP0A06 generic container on designated "GPER" virtual device */
+                    if (find_pattern("GPER", 4) && find_pattern("PNP0A06", 7)) {
+                        debug("FIRMWARE: Motherboard resources allocated via PNP0A06 generic container");
                         return core::add(brand_enum::QEMU);
+                    }
+
+                    /* QEMU dummy SATA controller named D0FA on Device 31, Function 2 */
+                    constexpr u8 sata_addr_dummy[] = { 0x08, 0x5F, 0x41, 0x44, 0x52, 0x0C, 0x02, 0x00, 0x1F, 0x00 };
+                    if (find_pattern("D0FA", 4) && find_pattern(reinterpret_cast<const char*>(sata_addr_dummy), sizeof(sata_addr_dummy))) {
+                        debug("FIRMWARE: Detected QEMU dummy SATA controller named D0FA on Device 31, Function 2");
+                        return core::add(brand_enum::QEMU);
+                    }
+
+                    /* Real ICH9 contains multiple USB controllers (EHC1/EHC2, UHC1-UHC6). Here I put XHC to match XHC, XHC_, XHC1, or XHCI */
+                    if (find_pattern("LNKE", 4) && find_pattern("LNKH", 4)) {
+                        if (!find_pattern("EHC1", 4) && !find_pattern("EHC2", 4) && !find_pattern("UHC1", 4) && !find_pattern("XHC", 3)) {
+                            debug("FIRMWARE: Detected Q35 emulation footprint with complete absence of USB controller declarations");
+                            return core::add(brand_enum::QEMU);
+                        }
                     }
                 }
             }
@@ -8473,137 +8458,134 @@ public:
                 }
             }
 
-            /* 4) FADT structure limits validation */
-            if (memcmp(header.signature, "FACP", 4) == 0) {
-                if (header.length > buffer_len) {
-                    debug("FIRMWARE: declared header length larger than fetched length (declared ", header.length, ", fetched ", buffer_len, ")");
-                    return true;
-                }
-                if (buffer_len < sizeof(fadt_table)) {
-                    debug("FIRMWARE: FACP buffer too small (len ", buffer_len, ")");
-                    return true;
-                }
-
-                fadt_table fadt;
-                memcpy(&fadt, buffer, sizeof(fadt_table));
-
-                /* Preferred_PM_Profile: Mobile value is 2 */
-                if (fadt.preferred_pm_profile == 2) {
-                    is_mobile = true;
-                }
-
-                if (fadt.p_lvl2_lat == 0x0FFF || fadt.p_lvl3_lat == 0x0FFF) {
-                    debug("FIRMWARE: C2 and C3 latencies indicate VM");
-                    return true;
-                }
-            }
-
-            /* 5) DMA Remapping table validation */
-            if (memcmp(header.signature, "DMAR", 4) == 0) {
-                size_t offset = 48; /* Subtables start at offset 48 (0x30) */
-                while (offset + 4 <= buffer_len) {
-                    u16 subtable_type = 0;
-                    u16 subtable_len = 0;
-                    memcpy(&subtable_type, buffer + offset, sizeof(u16));
-                    memcpy(&subtable_len, buffer + offset + 2, sizeof(u16));
-
-                    if (subtable_len < 4 || offset + subtable_len > buffer_len) {
-                        break;
+            if (is_acpi) {
+                /* 4) FADT structure limits validation */
+                if (memcmp(header.signature, "FACP", 4) == 0) {
+                    if (header.length > buffer_len) {
+                        debug("FIRMWARE: declared header length larger than fetched length (declared ", header.length, ", fetched ", buffer_len, ")");
+                        return true;
+                    }
+                    if (buffer_len < sizeof(fadt_table)) {
+                        debug("FIRMWARE: FACP buffer too small (len ", buffer_len, ")");
+                        return true;
                     }
 
-                    /* Subtable type 0x0000 is DRHD(Hardware Unit Definition) */
-                    if (subtable_type == 0x0000 && subtable_len >= 16) {
-                        size_t scope_offset = offset + 16;
-                        const size_t scope_end = offset + subtable_len;
+                    fadt_table fadt;
+                    memcpy(&fadt, buffer, sizeof(fadt_table));
 
-                        while (scope_offset + 6 <= scope_end) {
-                            const u8 scope_type = buffer[scope_offset];
-                            const u8 scope_len = buffer[scope_offset + 1];
+                    if (fadt.p_lvl2_lat == 0x0FFF || fadt.p_lvl3_lat == 0x0FFF) {
+                        debug("FIRMWARE: C2 and C3 latencies indicate VM");
+                        return true;
+                    }
+                }
 
-                            if (scope_len < 6 || scope_offset + scope_len > scope_end) {
-                                break;
-                            }
+                /* 5) DMA Remapping table validation */
+                if (memcmp(header.signature, "DMAR", 4) == 0) {
+                    size_t offset = 48; /* Subtables start at offset 48 (0x30) */
+                    while (offset + 4 <= buffer_len) {
+                        u16 subtable_type = 0;
+                        u16 subtable_len = 0;
+                        memcpy(&subtable_type, buffer + offset, sizeof(u16));
+                        memcpy(&subtable_len, buffer + offset + 2, sizeof(u16));
 
-                            const u8 bus_num = buffer[scope_offset + 5];
+                        if (subtable_len < 4 || offset + subtable_len > buffer_len) {
+                            break;
+                        }
 
-                            /* QEMU / KVM maps the virtual IOAPIC to Bus 0xFF */
-                            if (scope_type == 0x03 && bus_num == 0xFF) {
-                                debug("FIRMWARE: DMAR IOAPIC mapped to invalid bus 0xFF (QEMU signature)");
-                                return core::add(brand_enum::QEMU);
-                            }
+                        /* Subtable type 0x0000 is DRHD(Hardware Unit Definition) */
+                        if (subtable_type == 0x0000 && subtable_len >= 16) {
+                            size_t scope_offset = offset + 16;
+                            const size_t scope_end = offset + subtable_len;
 
-                            /* Declaring Device 2 as a PCI Bridge(Type 02) is a topology conflict on Intel which reserves this for IGD */
-                            if (scope_type == 0x02 && scope_len >= 8 && bus_num == 0x00) { /* PCI Bridge Device */
-                                const u8 dev_num = buffer[scope_offset + 6];
-                                const u8 func_num = buffer[scope_offset + 7];
-                                if (dev_num == 0x02 && func_num == 0x00) {
-                                    debug("FIRMWARE: DMAR PCI Bridge on invalid Device 0x02 (QEMU root port signature)");
+                            while (scope_offset + 6 <= scope_end) {
+                                const u8 scope_type = buffer[scope_offset];
+                                const u8 scope_len = buffer[scope_offset + 1];
+
+                                if (scope_len < 6 || scope_offset + scope_len > scope_end) {
+                                    break;
+                                }
+
+                                const u8 bus_num = buffer[scope_offset + 5];
+
+                                /* QEMU / KVM maps the virtual IOAPIC to Bus 0xFF */
+                                if (scope_type == 0x03 && bus_num == 0xFF) {
+                                    debug("FIRMWARE: DMAR IOAPIC mapped to invalid bus 0xFF (QEMU signature)");
                                     return core::add(brand_enum::QEMU);
                                 }
+
+                                /* Declaring Device 2 as a PCI Bridge(Type 02) is a topology conflict on Intel which reserves this for IGD */
+                                if (scope_type == 0x02 && scope_len >= 8 && bus_num == 0x00) { /* PCI Bridge Device */
+                                    const u8 dev_num = buffer[scope_offset + 6];
+                                    const u8 func_num = buffer[scope_offset + 7];
+                                    if (dev_num == 0x02 && func_num == 0x00) {
+                                        debug("FIRMWARE: DMAR PCI Bridge on invalid Device 0x02 (QEMU root port signature)");
+                                        return core::add(brand_enum::QEMU);
+                                    }
+                                }
+
+                                scope_offset += scope_len;
+                            }
+                        }
+                        offset += subtable_len;
+                    }
+                }
+
+                /* 6) APIC/MADT table validation */
+                if (memcmp(header.signature, "APIC", 4) == 0) {
+                    size_t offset = 44; /* MADT subtables start at offset 44 (0x2C) */
+                    u8 qemu_override_mask = 0;
+
+                    while (offset + 2 <= buffer_len) {
+                        const u8 subtable_type = buffer[offset];
+                        const u8 subtable_len = buffer[offset + 1];
+
+                        if (subtable_len < 2 || offset + subtable_len > buffer_len) {
+                            break;
+                        }
+
+                        /* Subtable type 0x02 is Interrupt Source Override */
+                        if (subtable_type == 0x02 && subtable_len == 10) {
+                            const u8 bus = buffer[offset + 2];
+                            const u8 source = buffer[offset + 3];
+                            u32 global_system_interrupt = 0;
+                            u16 flags = 0;
+
+                            memcpy(&global_system_interrupt, buffer + offset + 4, sizeof(u32));
+                            memcpy(&flags, buffer + offset + 8, sizeof(u16));
+
+                            u8 source_mask = 0;
+                            switch (source) {
+                            case 5:  source_mask = 1u << 0; break;
+                            case 9:  source_mask = 1u << 1; break;
+                            case 10: source_mask = 1u << 2; break;
+                            case 11: source_mask = 1u << 3; break;
+                            default: break;
                             }
 
-                            scope_offset += scope_len;
+                            /*
+                             * QEMU's default PCI IRQ mask emits identity-mapped ISOs for
+                             * IRQs 5, 9, 10, and 11 with active-high, level-triggered
+                             * semantics. For the ISA bus, conforming polarity (0) and
+                             * explicit active-high polarity (1) are equivalent, so both
+                             * flags 0x000C and 0x000D represent the same interrupt.
+                             */
+                            const u16 polarity = flags & 0x0003;
+                            const u16 trigger_mode = flags & 0x000C;
+                            const bool valid_flags = (flags & 0xFFF0) == 0;
+                            const bool active_high = polarity == 0 || polarity == 1;
+                            const bool level_triggered = trigger_mode == 0x000C;
+
+                            if (source_mask != 0 && bus == 0 && global_system_interrupt == source && valid_flags && active_high && level_triggered) {
+                                qemu_override_mask |= source_mask;
+                            }
                         }
-                    }
-                    offset += subtable_len;
-                }
-            }
-
-            /* 6) APIC/MADT table validation */
-            if (memcmp(header.signature, "APIC", 4) == 0) {
-                size_t offset = 44; /* MADT subtables start at offset 44 (0x2C) */
-                u8 qemu_override_mask = 0;
-
-                while (offset + 2 <= buffer_len) {
-                    const u8 subtable_type = buffer[offset];
-                    const u8 subtable_len = buffer[offset + 1];
-
-                    if (subtable_len < 2 || offset + subtable_len > buffer_len) {
-                        break;
+                        offset += subtable_len;
                     }
 
-                    /* Subtable type 0x02 is Interrupt Source Override */
-                    if (subtable_type == 0x02 && subtable_len == 10) {
-                        const u8 bus = buffer[offset + 2];
-                        const u8 source = buffer[offset + 3];
-                        u32 global_system_interrupt = 0;
-                        u16 flags = 0;
-
-                        memcpy(&global_system_interrupt, buffer + offset + 4, sizeof(u32));
-                        memcpy(&flags, buffer + offset + 8, sizeof(u16));
-
-                        u8 source_mask = 0;
-                        switch (source) {
-                        case 5:  source_mask = 1u << 0; break;
-                        case 9:  source_mask = 1u << 1; break;
-                        case 10: source_mask = 1u << 2; break;
-                        case 11: source_mask = 1u << 3; break;
-                        default: break;
-                        }
-
-                        /*
-                         * QEMU's default PCI IRQ mask emits identity-mapped ISOs for
-                         * IRQs 5, 9, 10, and 11 with active-high, level-triggered
-                         * semantics. For the ISA bus, conforming polarity (0) and
-                         * explicit active-high polarity (1) are equivalent, so both
-                         * flags 0x000C and 0x000D represent the same interrupt.
-                         */
-                        const u16 polarity = flags & 0x0003;
-                        const u16 trigger_mode = flags & 0x000C;
-                        const bool valid_flags = (flags & 0xFFF0) == 0;
-                        const bool active_high = polarity == 0 || polarity == 1;
-                        const bool level_triggered = trigger_mode == 0x000C;
-
-                        if (source_mask != 0 && bus == 0 && global_system_interrupt == source && valid_flags && active_high && level_triggered) {
-                            qemu_override_mask |= source_mask;
-                        }
+                    if (qemu_override_mask == 0x0F) {
+                        debug("FIRMWARE: APIC table contains QEMU-specific Interrupt Source Overrides");
+                        return core::add(brand_enum::QEMU);
                     }
-                    offset += subtable_len;
-                }
-
-                if (qemu_override_mask == 0x0F) {
-                    debug("FIRMWARE: APIC table contains QEMU-specific Interrupt Source Overrides");
-                    return core::add(brand_enum::QEMU);
                 }
             }
 
@@ -8642,14 +8624,14 @@ public:
                 if (sz > work_buffer.capacity()) work_buffer.reserve(sz);
                 work_buffer.resize(sz);
                 if (GetSystemFirmwareTable(acpi_signature, dsdt_swapped, work_buffer.data(), sz) == sz) {
-                    if (scan_buffer(work_buffer.data(), work_buffer.size())) {
+                    if (scan_buffer(work_buffer.data(), work_buffer.size(), true)) {
                         return true;
                     }
                 }
             }
         }
 
-        auto fetch_and_scan = [&](const DWORD provider, const DWORD table_id) -> bool {
+        auto fetch_and_scan = [&](const DWORD provider, const DWORD table_id, bool is_acpi) -> bool {
             const DWORD sz = GetSystemFirmwareTable(provider, table_id, nullptr, 0);
             if (sz == 0) return false;
 
@@ -8660,12 +8642,12 @@ public:
                 return false;
             }
 
-            return scan_buffer(work_buffer.data(), sz);
-        };
+            return scan_buffer(work_buffer.data(), sz, is_acpi);
+            };
 
         /* Scan every ACPI table */
         for (const auto table_id : tables) {
-            if (fetch_and_scan(acpi_signature, table_id)) {
+            if (fetch_and_scan(acpi_signature, table_id, true)) {
                 return true;
             }
         }
@@ -8684,12 +8666,11 @@ public:
             if (EnumSystemFirmwareTables(prov, provider_tables.data(), e) != e) continue;
 
             for (const auto table_id : provider_tables) {
-                if (fetch_and_scan(prov, table_id)) {
+                if (fetch_and_scan(prov, table_id, false)) {
                     return true;
                 }
             }
         }
-
     #elif (LINUX)
         DIR* raw_dir = opendir("/sys/firmware/acpi/tables/");
         if (!raw_dir) {
@@ -8777,26 +8758,11 @@ public:
                 continue;
             }
 
-            if (scan_buffer(buffer.data(), file_size_u)) {
+            if (scan_buffer(buffer.data(), file_size_u, true)) {
                 return true;
             }
         }
     #endif
-
-        /* Post-processing and cross-table heuristic validation */
-        if (is_mobile) {
-            /* Heuristic 2: Battery check validation on mobile profiles */
-            if (!has_battery) {
-                debug("FIRMWARE: Mobile PM profile asserted but no physical ACPI battery (PNP0C0A) detected");
-                return true;
-            }
-
-            /* Heuristic 3: Thermal zone check validation on mobile profiles */
-            if (!has_thermal_zone) {
-                debug("FIRMWARE: Mobile PM profile asserted but no ACPI thermal zones detected");
-                return true;
-            }
-        }
 
         return false;
     }
@@ -10068,7 +10034,6 @@ public:
         constexpr const char* function_names[] = { "NtPowerInformation" }; /* Win8 // Windows Server 2012 */
         void* functions[ARRAYSIZE(function_names)] = {};
         memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
-
         if (!functions[0]) return false;
 
         using nt_power_information_fn = NTSTATUS(__stdcall*)(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
@@ -10089,8 +10054,7 @@ public:
         const bool s4_supported = caps.SystemS4;
         const bool hiber_file_present = caps.HiberFilePresent;
 
-        const bool is_physical_pattern = (s0_supported || s3_supported) &&
-            (s4_supported || hiber_file_present);
+        const bool is_physical_pattern = (s0_supported || s3_supported) && (s4_supported || hiber_file_present);
 
         if (is_physical_pattern) {
             return false;
@@ -10109,6 +10073,47 @@ public:
         if (no_sleep_states) {
             debug("POWER_CAPABILITIES: Detected !(S0||S1||S2||S3||S4||H) pattern");
             return true;
+        }
+
+        const char* manufacturer = nullptr;
+        const char* model = nullptr;
+
+        /* Some devices like Latitude 5440 and Lenovo 11BES09T00 do not expose thermal control */
+        if (util::get_manufacturer_model(&manufacturer, &model)) {
+            auto ci_contains = [](const char* hay, const char* needle) noexcept -> bool {
+                if (!hay || !needle || !*hay || !*needle) return false;
+
+                for (const char* h = hay; *h; ++h) {
+                    const char* a = h;
+                    const char* b = needle;
+
+                    while (*a && *b) {
+                        unsigned char ca = static_cast<unsigned char>(*a);
+                        unsigned char cb = static_cast<unsigned char>(*b);
+
+                        if (ca >= 'A' && ca <= 'Z') ca += 32;
+                        if (cb >= 'A' && cb <= 'Z') cb += 32;
+
+                        if (ca != cb) break;
+                        ++a;
+                        ++b;
+                    }
+
+                    if (!*b)
+                        return true;
+                }
+
+                return false;
+            };
+
+            const bool is_lenovo = ci_contains(manufacturer, "LENOVO");
+            const bool is_dell = ci_contains(manufacturer, "Dell Inc.");
+            const bool is_latitude = ci_contains(model, "Latitude");
+
+            if (is_lenovo || (is_dell && is_latitude)) {
+                debug("Lenovo or Dell device detected, aborting thermal control check");
+                return false;
+            }
         }
 
         return (caps.ThermalControl == 0);
@@ -12753,7 +12758,7 @@ public:
             return false;
         }
 
-        /* Surface Pro models typically do not have PIT, some devices might have it but not expose it due to firmware bugs (i.e. Lenovo 83AG) */
+        /* Microsoft Surface and Xiaomi models typically do not have PIT, some devices might have it but not expose it due to firmware bugs (i.e. Lenovo 83AG) */
         const char* manufacturer = nullptr;
         const char* model = nullptr;
 
@@ -12784,10 +12789,12 @@ public:
                 return false;
             };
 
-            const bool is_surface_pro = ci_contains(model, "surface pro");
-            const bool is_microsoft = ci_contains(manufacturer, "microsoft");
+            const bool is_surface = ci_contains(model, "Surface");
+            const bool is_microsoft = ci_contains(manufacturer, "Microsoft");
+            const bool is_xiaomi = ci_contains(manufacturer, "XIAOMI"); /* REDMI Books do not have PIT */
 
-            if (is_surface_pro && is_microsoft) {
+            if ((is_surface && is_microsoft) || is_xiaomi) {
+                debug("Surface or Xiaomi device found, aborting PIT/AT check");
                 return false;
             }
         }
@@ -14394,6 +14401,47 @@ public:
             debug("TPM: libtpm detected");
             free_resources();
             return true;
+        }
+
+        const char* manufacturer = nullptr;
+        const char* model = nullptr;
+
+        if (util::get_manufacturer_model(&manufacturer, &model)) {
+            auto ci_contains = [](const char* hay, const char* needle) noexcept -> bool {
+                if (!hay || !needle || !*hay || !*needle) return false;
+
+                for (const char* h = hay; *h; ++h) {
+                    const char* a = h;
+                    const char* b = needle;
+
+                    while (*a && *b) {
+                        unsigned char ca = static_cast<unsigned char>(*a);
+                        unsigned char cb = static_cast<unsigned char>(*b);
+
+                        if (ca >= 'A' && ca <= 'Z') ca += 32;
+                        if (cb >= 'A' && cb <= 'Z') cb += 32;
+
+                        if (ca != cb) break;
+                        ++a;
+                        ++b;
+                    }
+
+                    if (!*b)
+                        return true;
+                }
+
+                return false;
+            };
+
+            const bool is_lenovo = ci_contains(manufacturer, "LENOVO");
+            const bool is_hp = ci_contains(manufacturer, "HP") || ci_contains(manufacturer, "Hewlett-Packard");
+            const bool is_acer = ci_contains(manufacturer, "Acer");
+
+            if (is_lenovo || is_hp || is_acer) {
+                debug("TPM: Recognized OEM manufacturer which normally manufactures buggy firmware, skipping PCR mismatch check.");
+                free_resources();
+                return false;
+            }
         }
 
         /* Get raw log size and allocate log buffer */
