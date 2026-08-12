@@ -389,6 +389,16 @@
     #endif
 #endif
 
+#if (GCC || CLANG)
+    #define TARGET_AVX    __attribute__((target("avx")))
+    #define TARGET_AVX2   __attribute__((target("avx2")))
+    #define TARGET_AVX512 __attribute__((target("avx512f")))
+#else
+    #define TARGET_AVX
+    #define TARGET_AVX2
+    #define TARGET_AVX512
+#endif
+
 #define VMAWARE_UNUSED(x) ((void)(x))
 
 #if (CLANG)
@@ -535,17 +545,18 @@
             0x9D,                                      /* 28: popfq/popfd */
             0xC3                                       /* 29: ret */
         };
-        static const unsigned char singlestep_stub[] VMAWARE_SECTION = {
-            0x9C,                                     /* pushfq */
-            0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* or dword ptr [rsp], 0x100 (sets TF) */
-            0x9D,                                     /* popfq */
-            0x0F, 0xA2,                               /* cpuid */
-            0xC7, 0xB2,                               /* db 0xC7, 0xB2 (invalid opcode) */
-            0xC3                                      /* ret */
-        };
         static const unsigned char ud_stub[] VMAWARE_SECTION = { 0x0F, 0x0B, 0xC3 }; /* ud2; ret */
 
         #if (x86_64)
+            static const unsigned char singlestep_stub[] VMAWARE_SECTION = {
+                0x49, 0x89, 0xD8,                         /* mov r8, rbx */
+                0x9C,                                     /* pushfq */
+                0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* or dword ptr [rsp], 0x100 (sets TF) */
+                0x9D,                                     /* popfq */
+                0x0F, 0xA2,                               /* cpuid */
+                0xC7, 0xB2,                               /* db 0xC7, 0xB2 (invalid opcode) */
+                0xC3                                      /* ret */
+            };
             static const unsigned char trampoline_stub[] VMAWARE_SECTION = {
                 0x49, 0x89, 0xD8,                         /* mov r8, rbx (save rbx to volatile register r8) */
                 0x9C,                                     /* pushfq */
@@ -591,6 +602,16 @@
             static const unsigned char dbvm_icebp_stub[] VMAWARE_SECTION = {
                 0xF1,                                           /* icebp */
                 0xC3                                            /* ret */
+            };
+        #elif (x86_32)
+            static const unsigned char singlestep_stub[] VMAWARE_SECTION = {
+                0x89, 0xDF,                               /* mov edi, ebx */
+                0x9C,                                     /* pushfd */
+                0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* or dword ptr [esp], 0x100 (sets TF) */
+                0x9D,                                     /* popfd */
+                0x0F, 0xA2,                               /* cpuid */
+                0xC7, 0xB2,                               /* db 0xC7, 0xB2 (invalid opcode) */
+                0xC3                                      /* ret */
             };
         #endif
     #elif (ARM32)
@@ -3613,9 +3634,9 @@ public:
                 }
 
                 /* Golden Rule 2: Counter thread always in the middle available physical CPU (or 2nd core if exactly 2) */
-                DWORD unique_cores[64]{};
+                DWORD unique_cores[256]{};
                 DWORD unique_cores_count = 0;
-                DWORD core_to_logical[64]{};
+                DWORD core_to_logical[256]{};
 
                 for (DWORD i = 0; i < active_cpu_count; ++i) {
                     const DWORD log = idxs[i];
@@ -3629,9 +3650,14 @@ public:
                         }
                     }
                     if (!already_seen) {
-                        unique_cores[unique_cores_count] = core;
-                        core_to_logical[unique_cores_count] = log;
-                        unique_cores_count++;
+                        if (unique_cores_count < 64) {
+                            unique_cores[unique_cores_count] = core;
+                            core_to_logical[unique_cores_count] = log;
+                            unique_cores_count++;
+                        }
+                        else {
+                            break;
+                        }
                     }
                 }
 
@@ -3952,7 +3978,7 @@ public:
                 if (!current_name) continue;
                 const std::string s_name(current_name);
 
-                /* Only query and populate the cache if it's not a dynamically loaded module with LoadLibrary */
+                /* Only query and populate the cache if it's not a dynamically loaded module with LoadLibraryEx */
                 if (cache_result) {
                     func_map& module_cache = function_cache[hModule];
                     const auto cache_it = module_cache.find(s_name);
@@ -4728,6 +4754,203 @@ public:
                 return found;
             };
 
+            auto is_log_present = []() -> bool {
+            #pragma pack(push, 1)
+                struct tcg_pcr_event_header {
+                    u8 pad[28];
+                    u32 event_data_size;
+                    u8 event_data[1];
+                };
+                struct tcg_efi_spec_id_event_struct_header {
+                    u8 pad[24];
+                    u32 number_of_algorithms;
+                };
+                struct tbs_context_params {
+                    u32 version;
+                };
+            #pragma pack(pop)
+
+                using pfn_tbsi_get_tcg_log_ex = int(__stdcall*)(u32, u8*, u32*);
+                using pfn_tbsi_context_create = int(__stdcall*)(void*, void**);
+                using pfn_tbsi_get_tcg_log = int(__stdcall*)(void*, u8*, u32*);
+                using pfn_tbsip_context_close = int(__stdcall*)(void*);
+
+                const HMODULE tbs_module = LoadLibraryExW(L"tbs.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                if (!tbs_module) {
+                    return true; /* If not Windows 10, return true (legit) to not false flag */
+                }
+
+                const char* function_names[] = {
+                    "Tbsi_Get_TCG_Log_Ex",
+                    "Tbsi_Context_Create",
+                    "Tbsi_Get_TCG_Log",
+                    "Tbsip_Context_Close"
+                };
+                constexpr size_t function_count = sizeof(function_names) / sizeof(function_names[0]);
+                void* functions[function_count] = {};
+                memory::get_function_address(tbs_module, function_names, functions, function_count);
+
+                const pfn_tbsi_get_tcg_log_ex get_tcg_log_ex = reinterpret_cast<pfn_tbsi_get_tcg_log_ex>(functions[0]);
+                const pfn_tbsi_context_create context_create = reinterpret_cast<pfn_tbsi_context_create>(functions[1]);
+                const pfn_tbsi_get_tcg_log get_tcg_log = reinterpret_cast<pfn_tbsi_get_tcg_log>(functions[2]);
+                const pfn_tbsip_context_close context_close = reinterpret_cast<pfn_tbsip_context_close>(functions[3]);
+
+                if (!get_tcg_log_ex && !(context_create && get_tcg_log && context_close)) {
+                    FreeLibrary(tbs_module);
+                    return true; /* If not Windows 10, return true (legit) to not false flag */
+                }
+
+                u32 log_size = 0;
+                u8* log_buffer = nullptr;
+                int hr = -1;
+
+                if (get_tcg_log_ex) {
+                    hr = get_tcg_log_ex(0, nullptr, &log_size);
+                    if ((hr == 0 || hr == 0x80284005) && log_size > 0) {
+                        log_buffer = new u8[log_size];
+                        hr = get_tcg_log_ex(0, log_buffer, &log_size);
+                    }
+                }
+                else if (context_create && get_tcg_log && context_close) {
+                    void* context = nullptr;
+                    tbs_context_params params{};
+                    params.version = 1;
+                    hr = context_create(&params, &context);
+                    if (hr == 0) {
+                        hr = get_tcg_log(context, nullptr, &log_size);
+                        if ((hr == 0 || hr == 0x80284005) && log_size > 0) {
+                            log_buffer = new u8[log_size];
+                            hr = get_tcg_log(context, log_buffer, &log_size);
+                        }
+                        context_close(context);
+                    }
+                }
+
+                FreeLibrary(tbs_module);
+
+                if (hr != 0 || !log_buffer) {
+                    delete[] log_buffer;
+                    return true; /* No functional TPM? */
+                }
+
+                bool found_hyperv = false;
+                do {
+                    if (log_size < 32) break;
+                    const auto* const first_event = reinterpret_cast<const tcg_pcr_event_header*>(log_buffer);
+                    const size_t first_event_size = static_cast<size_t>(32) + first_event->event_data_size;
+                    if (first_event_size > log_size) break;
+
+                    const bool crypto_agile = (first_event->event_data_size >= 16 && memcmp(first_event->event_data, "Spec ID Event03", 15) == 0);
+
+                    struct alg_size_pair {
+                        u16 alg_id;
+                        u16 digest_size;
+                    };
+
+                    alg_size_pair alg_sizes[16] = {
+                        {0x0004, 20}, /* SHA1 */
+                        {0x000B, 32}, /* SHA256 */
+                        {0x000C, 48}, /* SHA384 */
+                        {0x000D, 64}, /* SHA512 */
+                        {0x0012, 32}  /* SM3 */
+                    };
+                    size_t alg_count = 5;
+
+                    if (crypto_agile) {
+                        if (first_event->event_data_size >= sizeof(tcg_efi_spec_id_event_struct_header)) {
+                            const auto* const spec_id = reinterpret_cast<const tcg_efi_spec_id_event_struct_header*>(first_event->event_data);
+                            const u8* p_alg = first_event->event_data + sizeof(*spec_id);
+                            if (first_event->event_data_size - sizeof(*spec_id) >= static_cast<unsigned long long>(spec_id->number_of_algorithms) * 4) {
+                                for (u32 i = 0; i < spec_id->number_of_algorithms; ++i, p_alg += 4) {
+                                    const u16 alg_id = *reinterpret_cast<const u16*>(p_alg);
+                                    const u16 digest_size = *reinterpret_cast<const u16*>(p_alg + 2);
+                                    bool updated = false;
+                                    for (size_t j = 0; j < alg_count; ++j) {
+                                        if (alg_sizes[j].alg_id == alg_id) {
+                                            alg_sizes[j].digest_size = digest_size;
+                                            updated = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!updated && alg_count < 16) {
+                                        alg_sizes[alg_count++] = { alg_id, digest_size };
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    size_t offset = first_event_size;
+
+                    constexpr const wchar_t* hyperv_targets[] = {
+                        L"hvix64.exe", L"hvax64.exe", L"hvloader.dll", L"securekernel.exe",
+                        L"winresume.efi", L"hiberresume.exe", L"hiberrsm.exe" /* If PC booted from hibernation, Hyper-V measurements won't be present */
+                    };
+
+                    const auto scan_targets = [&](const u32 pcr, const u32 event_size, const u8* const event_data) -> bool {
+                        if (pcr == 11 || pcr == 13) {
+                            for (const auto& target : hyperv_targets) {
+                                const auto* const pat = reinterpret_cast<const u8*>(target);
+                                size_t target_len = 0;
+                                while (target[target_len] != L'\0') target_len++;
+                                const size_t len = target_len * 2;
+
+                                if (event_size >= len && std::search(event_data, event_data + event_size, pat, pat + len) != event_data + event_size) {
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    };
+
+                    while (offset < log_size) {
+                        if (crypto_agile) {
+                            if (offset + 12 > log_size) break;
+                            const u32 pcr = *reinterpret_cast<const u32*>(log_buffer + offset);
+                            const u32 digest_count = *reinterpret_cast<const u32*>(log_buffer + offset + 8);
+
+                            size_t temp = offset + 12;
+                            for (u32 i = 0; i < digest_count && temp + 2 <= log_size; ++i) {
+                                const u16 alg_id = *reinterpret_cast<const u16*>(log_buffer + temp);
+                                u16 digest_size = 0;
+                                for (size_t j = 0; j < alg_count; ++j) {
+                                    if (alg_sizes[j].alg_id == alg_id) {
+                                        digest_size = alg_sizes[j].digest_size;
+                                        break;
+                                    }
+                                }
+                                temp += static_cast<unsigned long long>(2) + digest_size;
+                            }
+
+                            if (temp + 4 > log_size) break;
+                            const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + temp);
+                            const u8* const event_data = log_buffer + temp + 4;
+                            offset = temp + 4 + event_size;
+
+                            if (offset <= log_size && scan_targets(pcr, event_size, event_data)) {
+                                found_hyperv = true;
+                                break;
+                            }
+                        }
+                        else {
+                            if (offset + 32 > log_size) break;
+                            const u32 pcr = *reinterpret_cast<const u32*>(log_buffer + offset);
+                            const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + offset + 28);
+                            const u8* const event_data = log_buffer + offset + 32;
+                            offset += 32 + static_cast<unsigned long long>(event_size);
+
+                            if (offset <= log_size && scan_targets(pcr, event_size, event_data)) {
+                                found_hyperv = true;
+                                break;
+                            }
+                        }
+                    }
+                } while (false);
+
+                delete[] log_buffer;
+                return found_hyperv;
+            };
+
             const char* enlightenment_str = cpu::cpu_manufacturer(cpu::leaf::hv_enlightenment);
             if (enlightenment_str && util::find(enlightenment_str, "KVM")) {
                 debug("HYPER-X: Detected Hyper-V enlightenments");
@@ -4764,6 +4987,10 @@ public:
                         debug("HYPER-X: Hypervisor Hardware Abstraction Layer: ", hal);
                         is_hyper_v_host &= hal;
                     }
+
+                    const bool tpml = is_log_present();
+                    debug("HYPER-X: Hypervisor Measured Boot Log: ", tpml);
+                    is_hyper_v_host &= tpml;
 
                     if (is_hyper_v_host) {
                         debug("HYPER-X: Detected Hyper-V host machine");
@@ -4852,15 +5079,13 @@ public:
             }
 
             auto is_placeholder = [](const char* s) noexcept -> bool {
-                if (!s || !*s) {
-                    return true;
-                }
+                if (!s || !*s) return true;
 
-                return strcmp(s, "System Product Name") == 0 ||
-                    strcmp(s, "To Be Filled By O.E.M.") == 0 ||
-                    strcmp(s, "Default string") == 0 ||
-                    strcmp(s, "Not Specified") == 0 ||
-                    strcmp(s, "None") == 0;
+                return _stricmp(s, "System Product Name") == 0 ||
+                    _stricmp(s, "To Be Filled By O.E.M.") == 0 ||
+                    _stricmp(s, "Default string") == 0 ||
+                    _stricmp(s, "Not Specified") == 0 ||
+                    _stricmp(s, "None") == 0;
             };
 
             auto read_reg_utf8 = [](const wchar_t* value_name, char* out, size_t out_size) noexcept -> bool {
@@ -5829,6 +6054,14 @@ public:
         #endif
         };
 
+    #if (WINDOWS && defined __VMAWARE_DEBUG__)
+        const char* manufacturer = "";
+        const char* device_model = "";
+        if (util::get_manufacturer_model(&manufacturer, &device_model)) {
+            debug("{\"manufacturer\": \"", manufacturer, "\", \"model\": \"", device_model, "\"}");
+        }
+    #endif
+
         constexpr size_t max_model_len = 32;
         cpu::cpu_type type = cpu::cpu_type::UNKNOWN;
         size_t db_size = 0;
@@ -5926,15 +6159,6 @@ public:
         }
 
         debug("CPU model = ", model_name);
-
-        #if (WINDOWS && defined __VMAWARE_DEBUG__)
-            const char* manufacturer = "";
-            const char* model = "";
-            if (util::get_manufacturer_model(&manufacturer, &model)) {
-                debug("{\"manufacturer\": \"", manufacturer,
-                    "\", \"model\": \"", model, "\"}");
-            }            
-        #endif
 
         const u32 actual = memo::thread_count::fetch();
         const bool model_expects_smt = matched->smt;
@@ -6156,17 +6380,15 @@ public:
         /* Calculation of minimum threshold for instrution latency */
         double threshold = 2.5;
         bool check_nested_hypervisors = false;
-        bool serialize_available = cpu::is_intel();
+        #if (x86_32)
+            VMAWARE_UNUSED(check_nested_hypervisors);
+        #endif
 
         if (util::hyper_x() == HYPERV_HOST) {
             debug("TIMER: Hyper-V detected, running nested checks");
             check_nested_hypervisors = true;
-            if (serialize_available)    threshold = 12.0;
-            else                        threshold = 25.0;
+            threshold = 15.0;
         }
-        #if (x86_32)
-            VMAWARE_UNUSED(check_nested_hypervisors);
-        #endif
 
         static timer::cache_state state;
         static_assert(alignof(timer::cache_state) >= 64, "timer::cache_state must be aligned to 64 bytes to prevent cache-line thrashing (false sharing).");
@@ -6224,6 +6446,7 @@ public:
             #undef TICK8
         };
 
+        bool serialize_available = cpu::is_intel();
         if (serialize_available) {
             /* SERIALIZE requires Ice Lake or newer */
             u32 l7_eax = 0, l7_ebx = 0, l7_ecx = 0, l7_edx = 0;
@@ -6459,6 +6682,7 @@ public:
     #if (x86_64)
         timer::timer_tick_t best_npf_l = (std::numeric_limits<timer::timer_tick_t>::max)();
         timer::timer_tick_t best_add_l = (std::numeric_limits<timer::timer_tick_t>::max)();
+        bool nested_bypass_detected = false;
     #endif
 
         std::thread t1(counter_thread);
@@ -6499,7 +6723,7 @@ public:
 
                     r_pre = *counter_ptr;
                     std::atomic_signal_fence(std::memory_order_acq_rel);
-                    _serialize(); /* first serialize is slower because of having to deal with the pipeline, subsequent only pay the architectural cost of the serialization itself */
+                    _serialize();
                     std::atomic_signal_fence(std::memory_order_acq_rel);
                     r_post = *counter_ptr;
 
@@ -6664,10 +6888,17 @@ public:
                     std::atomic_signal_fence(std::memory_order_seq_cst);
                     v_post = *nested_counter_ptr;
 
-                    if (v_post > v_pre && r_post > r_pre && exit_ctx.ExitReason == WHvRunVpExitReasonMemoryAccess) {
-                        npf_samples[npf_valid] = v_post - v_pre;
-                        add_samples[npf_valid] = r_post - r_pre;
-                        npf_valid++;
+                    if (v_post > v_pre && r_post > r_pre) {
+                        if (exit_ctx.ExitReason == WHvRunVpExitReasonMemoryAccess) {
+                            npf_samples[npf_valid] = v_post - v_pre;
+                            add_samples[npf_valid] = r_post - r_pre;
+                            npf_valid++;
+                        }
+                        else {
+                            debug("TIMER: Detected hypervisor faking exceptions for nested page faults");
+                            nested_bypass_detected = true;
+                            break;
+                        }                    
                     }
                 }
 
@@ -6727,7 +6958,7 @@ public:
         if (check_nested_hypervisors) {
             const double npf_ratio = best_add_l ? (double)best_npf_l / (double)best_add_l : 0;
             debug("TIMER: Memory > VMM -> ", best_npf_l, " | nVMM -> ", best_add_l, " | Ratio -> ", npf_ratio);
-            if (npf_ratio >= 4.00) hypervisor_detected = true;
+            if (npf_ratio >= 4.00 || nested_bypass_detected) hypervisor_detected = true;
         }
 
         /* Cleanup stuff until end of function */
@@ -7896,121 +8127,120 @@ public:
         const HANDLE current_thread = reinterpret_cast<HANDLE>(-2LL);
 
         /* Iterating processors for SGDT, SLDT, and SIDT */
-        for (DWORD i = 0; i < si.dwNumberOfProcessors; ++i) {
-            const DWORD_PTR mask = (DWORD_PTR)1 << i;
-            const DWORD_PTR previous_mask = SetThreadAffinityMask(current_thread, mask);
+        GROUP_AFFINITY original_group_aff{};
+        if (GetThreadGroupAffinity(current_thread, &original_group_aff)) {
+            for (DWORD i = 0; i < 64; ++i) {
+                if (original_group_aff.Mask & ((ULONG_PTR)1 << i)) {
+                    GROUP_AFFINITY target_aff = original_group_aff;
+                    target_aff.Mask = (ULONG_PTR)1 << i; 
 
-            if (previous_mask == 0) {
-                continue;
-            }
+                    if (SetThreadGroupAffinity(current_thread, &target_aff, nullptr)) {
+                        /* Technique 1: SGDT(x86 & x64) */
+                        {
+                        #if (x86_64)
+                            u8 gdtr[10] = { 0 };
+                        #else
+                            u8 gdtr[6] = { 0 };
+                        #endif
 
-            if (original_mask == 0) {
-                original_mask = previous_mask;
-            }
+                            __try {
+                            #if (CLANG || GCC)
+                                __asm__ volatile("sgdt %0" : "=m"(gdtr));
+                            #elif (MSVC && x86_32)
+                                __asm { sgdt gdtr }
+                            #else
+                                #pragma pack(push,1)
+                                struct {
+                                    u16 limit;
+                                    u64 base;
+                                } _gdtr = {};
+                                #pragma pack(pop)
+                                _sgdt(&_gdtr);
+                                memcpy(gdtr, &_gdtr, sizeof(_gdtr));
+                            #endif
+                            }
+                            __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-            /* Technique 1: SGDT (x86 & x64) */
-            {
-            #if (x86_64)
-                u8 gdtr[10] = { 0 };
-            #else
-                u8 gdtr[6] = { 0 };
-            #endif
+                            ULONG_PTR gdt_base = 0;
+                            memcpy(&gdt_base, &gdtr[2], sizeof(gdt_base));
 
-                __try {
-                #if (CLANG || GCC)
-                    __asm__ volatile("sgdt %0" : "=m"(gdtr));
-                #elif (MSVC && x86_32)
-                    __asm { sgdt gdtr }
-                #else
-                    #pragma pack(push,1)
-                    struct {
-                        u16 limit;
-                        u64 base;
-                    } _gdtr = {};
-                    #pragma pack(pop)
-                    _sgdt(&_gdtr);
-                    memcpy(gdtr, &_gdtr, sizeof(_gdtr));
-                #endif
-                }
-                __except (EXCEPTION_EXECUTE_HANDLER) {} /* CR4.UMIP */
+                            if ((gdt_base >> 24) == 0xFF) {
+                                debug("SGDT: 0xFF signature detected on core ", i);
+                                found = true;
+                            }
+                        }
 
-                ULONG_PTR gdt_base = 0;
-                memcpy(&gdt_base, &gdtr[2], sizeof(gdt_base));
+                        /* Technique 2: SLDT (x86_32 only) */
+                    #if (x86_32)
+                        if (!found) {
+                            u8 ldtr_buf[4] = { 0xEF, 0xBE, 0xAD, 0xDE };
+                            u32 ldt_val = 0;
 
-                if ((gdt_base >> 24) == 0xFF) {
-                    debug("SGDT: 0xFF signature detected on core %u", i);
-                    found = true;
-                }
-            }
+                            __try {
+                            #if (CLANG || GCC)
+                                __asm__ volatile("sldt %0" : "=m"(*(u16*)ldtr_buf));
+                            #else
+                                __asm {
+                                    sldt ax
+                                    mov  word ptr[ldtr_buf], ax
+                                }
+                            #endif
+                            }
+                            __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-            /* Technique 2: SLDT (x86_32 only) */
-            #if (x86_32)
-                if (!found) {
-                    u8 ldtr_buf[4] = { 0xEF, 0xBE, 0xAD, 0xDE };
-                    u32 ldt_val = 0;
-
-                    __try {
-                    #if (CLANG || GCC)
-                        __asm__ volatile("sldt %0" : "=m"(*(u16*)ldtr_buf));
-                    #else  /* MSVC */
-                        __asm {
-                            sldt ax
-                            mov  word ptr[ldtr_buf], ax
+                            memcpy(&ldt_val, ldtr_buf, sizeof(ldt_val));
+                            if (ldtr_buf[0] != 0x00 && ldtr_buf[1] != 0x00) {
+                                debug("SLDT: ldtr_buf signature detected");
+                                found = true;
+                            }
+                            if (ldt_val != 0xDEAD0000) {
+                                debug("SLDT: 0xDEAD0000 signature detected");
+                                found = true;
+                            }
                         }
                     #endif
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER) {} /* CR4.UMIP */
 
-                    memcpy(&ldt_val, ldtr_buf, sizeof(ldt_val));
-                    if (ldtr_buf[0] != 0x00 && ldtr_buf[1] != 0x00) {
-                        debug("SLDT: ldtr_buf signature detected");
-                        found = true;
-                    }
-                    if (ldt_val != 0xDEAD0000) {
-                        debug("SLDT: 0xDEAD0000 signature detected");
-                        found = true;
-                    }
-                }
-            #endif
+                        /* Technique 3: SIDT(x86 & x64) */
+                        if (!found) {
+                        #if (x86_64)    
+                            u8 idtr_buffer[10] = { 0 };
+                        #else
+                            u8 idtr_buffer[6] = { 0 };
+                        #endif
 
-                /* Technique 3: SIDT (x86 & x64) */
-                if (!found) {
-                #if (x86_64)
-                    u8 idtr_buffer[10] = { 0 };
-                #else
-                    u8 idtr_buffer[6] = { 0 };
-                #endif
+                            __try {
+                            #if (CLANG || GCC)
+                                __asm__ volatile("sidt %0" : "=m"(idtr_buffer));
+                            #elif (MSVC) && (x86_32)
+                                __asm { sidt idtr_buffer }
+                            #elif (MSVC) && (x86_64)
+                                #pragma pack(push, 1)
+                                struct {
+                                    USHORT Limit;
+                                    ULONG_PTR Base;
+                                } idtr;
+                                #pragma pack(pop)
+                                __sidt(&idtr);
+                                memcpy(idtr_buffer, &idtr, sizeof(idtr));
+                            #endif
+                            }
+                            __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-                    __try {
-                    #if (CLANG || GCC)
-                        __asm__ volatile("sidt %0" : "=m"(idtr_buffer));
-                    #elif (MSVC) && (x86_32)
-                        __asm { sidt idtr_buffer }
-                    #elif (MSVC) && (x86_64)
-                        #pragma pack(push, 1)
-                        struct {
-                            USHORT Limit;
-                            ULONG_PTR Base;
-                        } idtr;
-                        #pragma pack(pop)
-                        __sidt(&idtr);
-                        memcpy(idtr_buffer, &idtr, sizeof(idtr));
-                    #endif
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER) {} /* CR4.UMIP */
+                            ULONG_PTR idt_base = 0;
+                            memcpy(&idt_base, &idtr_buffer[2], sizeof(idt_base));
 
-                    ULONG_PTR idt_base = 0;
-                    memcpy(&idt_base, &idtr_buffer[2], sizeof(idt_base));
-
-                    /* Check for the 0xE8 signature (VPC/Hyper-V) in the high byte */
-                    if ((idt_base >> 24) == 0xE8) {
-                        debug("SIDT: VPC/Hyper-V signature detected on core %u", i);
-                        core::add(brand_enum::VPC, 100);
-                        found = true;
+                            if ((idt_base >> 24) == 0xE8) {
+                                debug("SIDT: VPC/Hyper-V signature detected on core ", i);
+                                core::add(brand_enum::VPC, 100);
+                                found = true;
+                            }
+                        }
                     }
                 }
+                if (found) break;
+            }
 
-            if (found) break;
+            SetThreadGroupAffinity(current_thread, &original_group_aff, nullptr);
         }
 
         if (original_mask != 0) {
@@ -8361,17 +8591,6 @@ public:
                         }
                     }
 
-                    /* CPU/PCI Hotplug synthetic I/O ranges (Prefixed with 0x0B WordPrefix to confirm actual I/O word sizing) */
-                    constexpr u8 cpu_hotplug_io[] = { 0x0B, 0xD8, 0x0C }; // 0x0B (WordPrefix) followed by 0x0CD8
-                    constexpr u8 pci_hotplug_io1[] = { 0x0B, 0xE0, 0xAF }; // 0x0B (WordPrefix) followed by 0xAFE0
-                    constexpr u8 pci_hotplug_io2[] = { 0x0B, 0x00, 0xAE }; // 0x0B (WordPrefix) followed by 0xAE00
-                    if (find_pattern(reinterpret_cast<const char*>(cpu_hotplug_io), sizeof(cpu_hotplug_io)) ||
-                        (find_pattern(reinterpret_cast<const char*>(pci_hotplug_io1), sizeof(pci_hotplug_io1)) &&
-                            find_pattern(reinterpret_cast<const char*>(pci_hotplug_io2), sizeof(pci_hotplug_io2)))) {
-                        debug("FIRMWARE: Detected QEMU CPU/PCI synthetic hotplug I/O ports");
-                        return core::add(brand_enum::QEMU);
-                    }
-
                     /* QEMU PIRQ Routing rotation names */
                     if (find_pattern("LNKE", 4) && find_pattern("LNKH", 4) && find_pattern("GSIE", 4) && find_pattern("GSIH", 4)) {
                         debug("FIRMWARE: Detected QEMU sequential PIRQ routing names (LNKE-H, GSIE-H)");
@@ -8389,14 +8608,6 @@ public:
                     if (find_pattern("D0FA", 4) && find_pattern(reinterpret_cast<const char*>(sata_addr_dummy), sizeof(sata_addr_dummy))) {
                         debug("FIRMWARE: Detected QEMU dummy SATA controller named D0FA on Device 31, Function 2");
                         return core::add(brand_enum::QEMU);
-                    }
-
-                    /* Real ICH9 contains multiple USB controllers (EHC1/EHC2, UHC1-UHC6). Here I put XHC to match XHC, XHC_, XHC1, or XHCI */
-                    if (find_pattern("LNKE", 4) && find_pattern("LNKH", 4)) {
-                        if (!find_pattern("EHC1", 4) && !find_pattern("EHC2", 4) && !find_pattern("UHC1", 4) && !find_pattern("XHC", 3)) {
-                            debug("FIRMWARE: Detected Q35 emulation footprint with complete absence of USB controller declarations");
-                            return core::add(brand_enum::QEMU);
-                        }
                     }
                 }
             }
@@ -9088,8 +9299,9 @@ public:
     #if (x86_64)       
         #if (WINDOWS)
             const HMODULE ntdll = memory::get_ntdll();
-            if (!ntdll)
+            if (!ntdll) {
                 return false;
+            }
 
             const char* function_names[] = { "NtQuerySystemInformation" };
             void* functions[ARRAYSIZE(function_names)] = {};
@@ -9363,7 +9575,7 @@ public:
             BYTE identify_ctrl[4096];
             RtlZeroMemory(identify_ctrl, sizeof(identify_ctrl));
             if (query_protocol(StorageAdapterProtocolSpecificProperty, 1, 0x01, 0, identify_ctrl, sizeof(identify_ctrl))) {
-                const uint16_t oacs = *reinterpret_cast<const uint16_t*>(&identify_ctrl[256]);
+                const u16 oacs = *reinterpret_cast<const u16*>(&identify_ctrl[256]);
                 const bool supports_virtualization_mgmt = (oacs & (1 << 8)) != 0;
                 const bool supports_namespace_mgmt = (oacs & (1 << 3)) != 0;
                 const bool lacks_self_test = (oacs & (1 << 4)) == 0;
@@ -9378,12 +9590,12 @@ public:
             BYTE identify_ns[4096];
             RtlZeroMemory(identify_ns, sizeof(identify_ns));
             if (query_protocol(StorageDeviceProtocolSpecificProperty, 1, 0x00, 1, identify_ns, sizeof(identify_ns))) {
-                const uint8_t nlbaf = identify_ns[25]; /* Number of LBA Formats (0 - based) */
+                const u8 nlbaf = identify_ns[25]; /* Number of LBA Formats (0 - based) */
                 if (nlbaf == 7) { /* 8 available formats */
                     bool has_metadata_option = false;
                     for (int i = 0; i < 8; ++i) {
                         const size_t entry_offset = 128 + (static_cast<size_t>(i) * 4); /* LBA Format Table starts at offset 128 */
-                        const uint16_t ms = *reinterpret_cast<const uint16_t*>(&identify_ns[entry_offset]);
+                        const u16 ms = *reinterpret_cast<const u16*>(&identify_ns[entry_offset]);
                         if (ms != 0) {
                             has_metadata_option = true;
                             break;
@@ -10108,10 +10320,11 @@ public:
 
             const bool is_lenovo = ci_contains(manufacturer, "LENOVO");
             const bool is_dell = ci_contains(manufacturer, "Dell Inc.");
+            const bool is_qiyida = ci_contains(manufacturer, "QIYIDA");
             const bool is_latitude = ci_contains(model, "Latitude");
 
-            if (is_lenovo || (is_dell && is_latitude)) {
-                debug("Lenovo or Dell device detected, aborting thermal control check");
+            if (is_lenovo || is_qiyida || (is_dell && is_latitude)) {
+                debug("Lenovo, Qiyida or Dell device detected, aborting thermal control check");
                 return false;
             }
         }
@@ -11318,7 +11531,7 @@ public:
 
         /* Static struct for SEH filtering to avoid release-mode lambda optimizations */
         struct exception_handler {
-            static LONG evaluate(u32 code, EXCEPTION_POINTERS* info, trap_context* ctx) noexcept {
+            static LONG execute(const u32 code, EXCEPTION_POINTERS* info, trap_context* ctx) noexcept {
                 if (!info || !info->ExceptionRecord || !info->ContextRecord) {
                     return EXCEPTION_CONTINUE_SEARCH;
                 }
@@ -11363,7 +11576,7 @@ public:
         __try {
             memory::execute(trampoline_stub);
         }
-        __except (exception_handler::evaluate(GetExceptionCode(), reinterpret_cast<EXCEPTION_POINTERS*>(_exception_info()), &ctx)) {
+        __except (exception_handler::execute(GetExceptionCode(), reinterpret_cast<EXCEPTION_POINTERS*>(_exception_info()), &ctx)) {
             /* Unreachable, the exception_handler always returns CONTINUE_EXECUTION or CONTINUE_SEARCH */
         }
 
@@ -11416,7 +11629,7 @@ public:
         }
 
         struct exception_handler {
-            static int evaluate(unsigned int code, struct _EXCEPTION_POINTERS* ep, volatile ULONG_PTR* out_trap_ip) {
+            static int execute(const unsigned int code, struct _EXCEPTION_POINTERS* ep, volatile ULONG_PTR* out_trap_ip) {
                 if (code == EXCEPTION_SINGLE_STEP && ep && ep->ContextRecord) {
                 #if (x86_64)
                     *out_trap_ip = ep->ContextRecord->Rip;
@@ -11454,7 +11667,7 @@ public:
                     popfd
             }
         }
-        __except (exception_handler::evaluate(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+        __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
 
         /*
          * Hypervisor is detected if the trap fired at any IP differing from the expected bare metal target
@@ -11469,7 +11682,7 @@ public:
         __try {
             memory::execute(blockstep_stub);
         }
-        __except (exception_handler::evaluate(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+        __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
 
         /*
          * Hypervisor is detected if execution trapped at any offset other than expected bare metal
@@ -12142,7 +12355,13 @@ public:
             return false;
         }
 
+        const HANDLE current_thread = reinterpret_cast<HANDLE>(-2);
+        const DWORD_PTR old_affinity = SetThreadAffinityMask(current_thread, 1);
+
         /* 1) Check for commonly disabled instructions on patches and VMs */
+        u32 max_leaf = 0, ebx_0 = 0, ecx_0 = 0, edx_0 = 0;
+        cpu::cpuid(max_leaf, ebx_0, ecx_0, edx_0, cpu::leaf::basic_info);
+
         u32 a = 0, b = 0, c = 0, d = 0;
         cpu::cpuid(a, b, c, d, cpu::leaf::features);
 
@@ -12161,10 +12380,10 @@ public:
 
         /* Need to do a lambda wrapper to isolate SEH from the parent function's stack unwinding */
         struct aes_executor {
-                #if (CLANG || GCC)
-                    __attribute__((__target__("aes")))
-                #endif
-                static bool VMAWARE_VECTORCALL check_aes_integrity(__m128i block, __m128i key_vec, unsigned char* o, const bool support) {
+            #if (CLANG || GCC)
+                __attribute__((__target__("aes")))
+            #endif
+            static bool VMAWARE_VECTORCALL check_aes_integrity(const __m128i block, const __m128i key_vec, unsigned char* o, const bool support) {
                 __try {
                     __m128i tmp = _mm_xor_si128(block, key_vec);
                     tmp = _mm_aesenc_si128(tmp, key_vec);
@@ -12179,7 +12398,7 @@ public:
                 __except (GetExceptionCode() == EXCEPTION_ILLEGAL_INSTRUCTION
                     ? EXCEPTION_EXECUTE_HANDLER
                     : EXCEPTION_CONTINUE_SEARCH
-                    ) 
+                    )
                 {
                     if (support) {
                         debug("CPU_HEURISTIC: Hypervisor reports AES, but it is not handled correctly");
@@ -12190,22 +12409,16 @@ public:
             }
         };
 
-        __m128i block_val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(plaintext));
-        __m128i key_val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(key));
+        const __m128i block_val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(plaintext));
+        const __m128i key_val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(key));
 
-        if (aes_executor::check_aes_integrity(block_val, key_val, out, aes_support)) return true;
+        bool is_spoofed = false;
+
+        if (aes_executor::check_aes_integrity(block_val, key_val, out, aes_support)) {
+            is_spoofed = true;
+        }
 
         /* Detect spoofed AVX state */
-    #if defined(__GNUC__) || defined(__clang__)
-        #define TARGET_AVX    __attribute__((target("avx")))
-        #define TARGET_AVX2   __attribute__((target("avx2")))
-        #define TARGET_AVX512 __attribute__((target("avx512f")))
-    #else
-        #define TARGET_AVX
-        #define TARGET_AVX2
-        #define TARGET_AVX512
-    #endif
-
         constexpr u32 CPUID1_OSXSAVE = 1u << 27;
         constexpr u32 CPUID1_AVX = 1u << 28;
 
@@ -12218,9 +12431,12 @@ public:
         const bool avx_adv = (c & CPUID1_AVX) != 0;
         const bool osxsave_adv = (c & CPUID1_OSXSAVE) != 0;
 
+        /*
+         * Due to this, it only triggers if a hypervisor has misconfigured its CPUID emulation
+         * (e.g., leaving AVX enabled in CPUID but disabling XSAVE or failing to emulate _xgetbv correctly)
+         */
         u32 a7 = 0, b7 = 0, c7 = 0, d7 = 0;
-        cpu::cpuid(a, b, c, d, cpu::leaf::basic_info, 0u);
-        if (a >= 7u) {
+        if (max_leaf >= 7u) {
             cpu::cpuid(a7, b7, c7, d7, cpu::leaf::ext_features, 0u);
         }
 
@@ -12228,66 +12444,80 @@ public:
         const bool avx512_adv = (b7 & CPUID7_AVX512F) != 0;
 
         /* Probe AVX */
-        auto is_avx_spoofed = [&]() TARGET_AVX noexcept -> bool{
+        auto is_avx_spoofed = [&]() TARGET_AVX noexcept -> bool {
+            /* If hardware doesn't advertise AVX, we cannot test it in user-mode */
             if (!avx_adv) return false;
-            if (!osxsave_adv) return true;
 
-            const u64 xcr0 = static_cast<u64>(_xgetbv(0));
-            if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) return true;
+            /*
+             * If the OS has not enabled XSAVE/XRSTOR, AVX cannot run
+             * This is normal bare-metal OS behavior (e.g. legacy/minimal bootloader environments)
+             */
+            if (!osxsave_adv) return false;
 
             alignas(32) float in0[8] = { 1,2,3,4,5,6,7,8 };
             alignas(32) float in1[8] = { 16,15,14,13,12,11,10,9 };
             alignas(32) float out[8] = {};
 
             __try {
-                const __m256 va = _mm256_load_ps(in0);
-                const __m256 vb = _mm256_load_ps(in1);
+                /* Since CPUID reports OSXSAVE as active, xgetbv is guaranteed to work */
+                const u64 xcr0 = static_cast<u64>(_xgetbv(0));
+                /*
+                 * If the OS has not enabled AVX state tracking in XCR0, AVX cannot execute
+                 * If a hypervisor misconfigures this, the xgetbv instruction itself will #UD here
+                 */
+                if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) return false;
+
+                const __m256 va = _mm256_loadu_ps(in0);
+                const __m256 vb = _mm256_loadu_ps(in1);
                 const __m256 vc = _mm256_add_ps(va, vb);
-                _mm256_store_ps(out, vc);
+                _mm256_storeu_ps(out, vc);
                 return out[0] != 17.0f;
             }
             __except (GetExceptionCode() == EXCEPTION_ILLEGAL_INSTRUCTION
                 ? EXCEPTION_EXECUTE_HANDLER
                 : EXCEPTION_CONTINUE_SEARCH)
             {
+                /*
+                 * CPUID says AVX is supported, OSXSAVE is enabled, and XCR0 has the AVX state bit
+                 * An illegal instruction exception here is architecturally impossible
+                 */
+                debug("CPU_HEURISTIC: Hypervisor detected hiding AVX capabilities");
                 return true;
             }
         };
 
         /* Probe AVX2 */
-        auto is_avx2_spoofed = [&]() TARGET_AVX2 noexcept -> bool {
+        auto is_avx2_spoofed = [&]() TARGET_AVX2 noexcept -> bool{
             if (!avx2_adv) return false;
-            if (!avx_adv || !osxsave_adv) return true;
-
-            const u64 xcr0 = static_cast<u64>(_xgetbv(0));
-            if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) return true;
+            if (!avx_adv || !osxsave_adv) return false;
 
             alignas(32) u32 in0[8] = { 1,2,3,4,5,6,7,8 };
             alignas(32) u32 in1[8] = { 16,15,14,13,12,11,10,9 };
             alignas(32) u32 out[8] = {};
 
             __try {
-                const __m256i va = _mm256_load_si256(reinterpret_cast<const __m256i*>(in0));
-                const __m256i vb = _mm256_load_si256(reinterpret_cast<const __m256i*>(in1));
+                const u64 xcr0 = static_cast<u64>(_xgetbv(0));
+                if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) return false;
+
+                const __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in0));
+                const __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in1));
                 const __m256i vc = _mm256_add_epi32(va, vb);
-                _mm256_store_si256(reinterpret_cast<__m256i*>(out), vc);
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), vc);
                 return out[0] != 17u;
             }
             __except (GetExceptionCode() == EXCEPTION_ILLEGAL_INSTRUCTION
                 ? EXCEPTION_EXECUTE_HANDLER
                 : EXCEPTION_CONTINUE_SEARCH)
             {
+                debug("CPU_HEURISTIC: Hypervisor detected hiding AVX2 capabilities");
                 return true;
             }
         };
 
         /* Probe AVX512 */
-        auto is_avx512_spoofed = [&]() TARGET_AVX512 noexcept -> bool {
+        auto is_avx512_spoofed = [&]() TARGET_AVX512 noexcept -> bool{
             if (!avx512_adv) return false;
-            if (!avx_adv || !osxsave_adv) return true;
-
-            const u64 xcr0 = static_cast<u64>(_xgetbv(0));
-            if ((xcr0 & XCR0_AVX512_MASK) != XCR0_AVX512_MASK) return true;
+            if (!avx_adv || !osxsave_adv) return false;
 
             alignas(64) u32 in0[16] = {
                 1,2,3,4,5,6,7,8, 9,10,11,12,13,14,15,16
@@ -12298,61 +12528,94 @@ public:
             alignas(64) u32 out[16] = {};
 
             __try {
-                const __m512i va = _mm512_load_si512(reinterpret_cast<const void*>(in0));
-                const __m512i vb = _mm512_load_si512(reinterpret_cast<const void*>(in1));
+                const u64 xcr0 = static_cast<u64>(_xgetbv(0));
+
+                /*
+                 * If the OS disabled AVX-512 state tracking (e.g. kernel flags or hybrid cores)
+                 * we return false. Running AVX-512 would legitimately #UD here
+                 */
+                if ((xcr0 & XCR0_AVX512_MASK) != XCR0_AVX512_MASK) return false;
+
+                const __m512i va = _mm512_loadu_si512(reinterpret_cast<const void*>(in0));
+                const __m512i vb = _mm512_loadu_si512(reinterpret_cast<const void*>(in1));
                 const __m512i vc = _mm512_add_epi32(va, vb);
-                _mm512_store_si512(reinterpret_cast<void*>(out), vc);
+                _mm512_storeu_si512(reinterpret_cast<void*>(out), vc);
                 return out[0] != 17u;
             }
             __except (GetExceptionCode() == EXCEPTION_ILLEGAL_INSTRUCTION
                 ? EXCEPTION_EXECUTE_HANDLER
                 : EXCEPTION_CONTINUE_SEARCH)
             {
+                debug("CPU_HEURISTIC: Hypervisor detected hiding AVX512 capabilities");
                 return true;
             }
         };
 
-        if (is_avx_spoofed() || is_avx2_spoofed() || is_avx512_spoofed()) {
-            debug("Hypervisor detected hiding AVX capabilities");
-            return true;
+        if (!is_spoofed) {
+            if (is_avx_spoofed() || is_avx2_spoofed() || is_avx512_spoofed()) {
+                is_spoofed = true;
+            }
         }
 
         const bool rdrand_support = ((c >> 30) & 1u) != 0;
 
-        auto check_rdrand_integrity = [&]() noexcept -> bool {
+        auto is_rdrand_spoofed = [&]() noexcept -> bool {
         #if (MSVC) && !(CLANG)
             unsigned int v = 0;
 
             __try {
                 const int ok = _rdrand32_step(&v);
-
                 if (ok && !rdrand_support) {
                     debug("CPU_HEURISTIC: Hypervisor detected hiding RDRAND capabilities");
+                    return true;
                 }
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
                 if (rdrand_support) {
-                   debug("CPU_HEURISTIC: Hypervisor did not handle RDRAND correctly");
+                    debug("CPU_HEURISTIC: Hypervisor did not handle RDRAND correctly");
+                    return true;
                 }
             }
         #else
             unsigned int v = 0;
             unsigned char ok = 0;
 
-            asm volatile("rdrand %0\n\tsetc %1"
-                : "=r"(v), "=qm"(ok)
-                :
-                : "cc");
+            __try {
+                asm volatile("rdrand %0\n\tsetc %1"
+                    : "=r"(v), "=qm"(ok)
+                    :
+                    : "cc"
+                );
 
-            if (ok && !rdrand_support) {
-                debug("CPU_HEURISTIC: Hypervisor detected hiding RDRAND capabilities");
+                if (ok && !rdrand_support) {
+                    debug("CPU_HEURISTIC: Hypervisor detected hiding RDRAND capabilities");
+                    return true;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                if (rdrand_support) {
+                    debug("CPU_HEURISTIC: Hypervisor did not handle RDRAND correctly");
+                    return true;
+                }
             }
         #endif
 
             return false;
         };
 
-        if (check_rdrand_integrity()) return true;
+        if (!is_spoofed) {
+            if (is_rdrand_spoofed()) {
+                is_spoofed = true;
+            }
+        }
+
+        if (old_affinity != 0) {
+            SetThreadAffinityMask(current_thread, old_affinity);
+        }
+
+        if (is_spoofed) {
+            return true;
+        }
 
         /* 2. Test if the CPU vendor is spoofed (for example, a CPU reports being AMD in CPUID, but it is Intel) */
         /*
@@ -13260,27 +13523,24 @@ public:
 
             volatile LONG did_anyone_throw = 0;
 
-            for (ULONG i = 0; i < num_processors && i < 256; ++i) {
-                /* Pin the current thread to physical core i */
-                ULONG_PTR affinity = (ULONG_PTR)1 << i;
-                status = nt_set_information_thread(current_thread, 4 /* ThreadAffinityMask */, &affinity, sizeof(affinity));
-                if (status < 0) {
-                    SetThreadGroupAffinity(current_thread, &original_affinity, nullptr);
-                    return false;
-                }
+            GROUP_AFFINITY active_group_aff{};
+            if (GetThreadGroupAffinity(current_thread, &active_group_aff)) {
+                for (ULONG i = 0; i < 64; ++i) {
+                    if (active_group_aff.Mask & ((ULONG_PTR)1 << i)) {
+                        GROUP_AFFINITY target_aff = active_group_aff;
+                        target_aff.Mask = (ULONG_PTR)1 << i; 
 
-                __try {
-                    memory::execute(pointer);
+                        if (SetThreadGroupAffinity(current_thread, &target_aff, nullptr)) {
+                            __try {
+                                memory::execute(pointer);
+                            }
+                            __except (EXCEPTION_EXECUTE_HANDLER) {
+                                did_anyone_throw = 1;
+                            }
+                        }
+                    }
                 }
-                __except (EXCEPTION_EXECUTE_HANDLER) {
-                    did_anyone_throw = 1;
-                }
-            }
-
-            SetThreadGroupAffinity(current_thread, &original_affinity, nullptr);
-
-            if (did_anyone_throw != 0) {
-                hook_detected = true;
+                SetThreadGroupAffinity(current_thread, &original_affinity, nullptr);
             }
         }
 
@@ -13311,7 +13571,7 @@ public:
         ermsb_trap_detected = false;
 
         struct handler {
-            static LONG __stdcall execute(PEXCEPTION_POINTERS ctx) {
+            static LONG __stdcall execute(const PEXCEPTION_POINTERS ctx) {
                 if (ctx->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
                     ermsb_trap_detected = true;
                     return EXCEPTION_CONTINUE_EXECUTION;
@@ -13400,14 +13660,26 @@ public:
         bool is_vm = true;
         DWORD exc_code = 0;
 
+        struct handler {
+            static LONG execute(const EXCEPTION_POINTERS* info, DWORD* exceptionCode) {
+                *exceptionCode = info->ExceptionRecord->ExceptionCode;
+            #if (x86_64)
+                info->ContextRecord->Rbx = info->ContextRecord->R8;
+            #elif (x86_32)
+                info->ContextRecord->Ebx = info->ContextRecord->Edi;
+            #endif
+                return EXCEPTION_EXECUTE_HANDLER;
+            }
+        };
+
         __try {
             memory::execute(singlestep_stub);
             /* If the hypervisor completely swallows all exceptions, is_vm still remains true */
         }
-        __except (exc_code = GetExceptionCode(), EXCEPTION_EXECUTE_HANDLER) {
+        __except (handler::execute(GetExceptionInformation(), &exc_code)) {
             /*
              * If the exception doesnt reach this block, hypervisor delayed the trap flag over cpuid, execution fell through into
-             * the bad bytes (C7 B2) causing EXCEPTION_ILLEGAL_INSTRUCTION
+             * the bad bytes (C7 B2) causing STATUS_ILLEGAL_INSTRUCTION
              */
             if (exc_code == EXCEPTION_SINGLE_STEP) {
                 is_vm = false; /* trap flag single-step exception triggered on CPUID */
