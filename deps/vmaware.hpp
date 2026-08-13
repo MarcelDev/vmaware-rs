@@ -6838,7 +6838,8 @@ public:
                 std::vector<timer::timer_tick_t> add_samples(sample_amount);
 
                 const bool npf_locked = 
-                    VirtualLock(npf_samples.data(), sample_amount * sizeof(timer::timer_tick_t)) &&
+                    VirtualLock(npf_samples.data(), sample_amount * sizeof(timer::timer_tick_t))
+                    &&
                     VirtualLock(add_samples.data(), sample_amount * sizeof(timer::timer_tick_t));
 
                 size_t npf_valid = 0;
@@ -6900,6 +6901,8 @@ public:
                             break;
                         }                    
                     }
+
+                    timer::engine::burn_random_cycles(ct_seed, v_post, r_post);
                 }
 
                 if (npf_valid > 0) {
