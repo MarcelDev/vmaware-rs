@@ -529,7 +529,7 @@
         static const unsigned char vmload_stub[] VMAWARE_SECTION = { 0x0F, 0x01, 0xDA, 0xC3 };
         static const unsigned char vmcall_stub[] VMAWARE_SECTION = { 0x0F, 0x01, 0xC1, 0xC3 };
         static const unsigned char vmmcall_stub[] VMAWARE_SECTION = { 0x0F, 0x01, 0xD9, 0xC3 };
-        static const unsigned char blockstep_stub[] VMAWARE_SECTION = {
+        static const unsigned char cpuid_blockstep_stub[] VMAWARE_SECTION = {
             0x53,                                      /* 0:  push rbx/ebx (preserve non-volatile register) */
             0x31, 0xC0,                                /* 1:  xor eax, eax */
             0x8C, 0xD0,                                /* 3:  mov ax, ss */
@@ -545,10 +545,27 @@
             0x9D,                                      /* 28: popfq/popfd */
             0xC3                                       /* 29: ret */
         };
+        static const unsigned char rdpru_blockstep_stub[] VMAWARE_SECTION = {
+            0x53,                                      /* 0:  push rbx/ebx */
+            0x31, 0xC9,                                /* 1:  xor ecx, ecx (set to MPERF to prevent #GP on bare metal) */
+            0x31, 0xC0,                                /* 3:  xor eax, eax */
+            0x8C, 0xD0,                                /* 5:  mov ax, ss */
+            0x9C,                                      /* 7:  pushfq/pushfd */
+            0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00,  /* 8:  or dword ptr [rsp/esp], 0x100 */
+            0x9D,                                      /* 15: popfq/popfd */
+            0x8E, 0xD0,                                /* 16: mov ss, ax  <- shadow starts here */
+            0x0F, 0x01, 0xFD,                          /* 18: rdpru       <- buggy hypervisor traps here */
+            0x5B,                                      /* 21: pop rbx/ebx <- bare metal traps here (offset 21) */
+            0x90,                                      /* 22: nop */
+            0x9C,                                      /* 23: pushfq/pushfd */
+            0x81, 0x24, 0x24, 0xFF, 0xFE, 0xFF, 0xFF,  /* 24: and dword ptr [rsp/esp], 0xFFFFFEFF */
+            0x9D,                                      /* 31: popfq/popfd */
+            0xC3                                       /* 32: ret */
+        };
         static const unsigned char ud_stub[] VMAWARE_SECTION = { 0x0F, 0x0B, 0xC3 }; /* ud2; ret */
 
         #if (x86_64)
-            static const unsigned char singlestep_stub[] VMAWARE_SECTION = {
+            static const unsigned char cpuid_singlestep_stub[] VMAWARE_SECTION = {
                 0x49, 0x89, 0xD8,                         /* mov r8, rbx */
                 0x9C,                                     /* pushfq */
                 0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* or dword ptr [rsp], 0x100 (sets TF) */
@@ -556,6 +573,16 @@
                 0x0F, 0xA2,                               /* cpuid */
                 0xC7, 0xB2,                               /* db 0xC7, 0xB2 (invalid opcode) */
                 0xC3                                      /* ret */
+            };
+            static const unsigned char rdpru_singlestep_stub[] VMAWARE_SECTION = {
+                0x49, 0x89, 0xD8,                         /* 0:  mov r8, rbx */
+                0x31, 0xC9,                               /* 3:  xor ecx, ecx (set to MPERF register index 0 to avoid GP) */
+                0x9C,                                     /* 5:  pushfq */
+                0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* 6:  or dword ptr [rsp], 0x100 (sets TF) */
+                0x9D,                                     /* 13: popfq */
+                0x0F, 0x01, 0xFD,                         /* 14: rdpru */
+                0xC7, 0xB2,                               /* 17: db 0xC7, 0xB2 (invalid opcode) */
+                0xC3                                      /* 19: ret */
             };
             static const unsigned char trampoline_stub[] VMAWARE_SECTION = {
                 0x49, 0x89, 0xD8,                         /* mov r8, rbx (save rbx to volatile register r8) */
@@ -604,7 +631,7 @@
                 0xC3                                            /* ret */
             };
         #elif (x86_32)
-            static const unsigned char singlestep_stub[] VMAWARE_SECTION = {
+            static const unsigned char cpuid_singlestep_stub[] VMAWARE_SECTION = {
                 0x89, 0xDF,                               /* mov edi, ebx */
                 0x9C,                                     /* pushfd */
                 0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* or dword ptr [esp], 0x100 (sets TF) */
@@ -612,6 +639,16 @@
                 0x0F, 0xA2,                               /* cpuid */
                 0xC7, 0xB2,                               /* db 0xC7, 0xB2 (invalid opcode) */
                 0xC3                                      /* ret */
+            };
+            static const unsigned char rdpru_singlestep_stub[] VMAWARE_SECTION = {
+                0x89, 0xDF,                               /* 0:  mov edi, ebx */
+                0x31, 0xC9,                               /* 2:  xor ecx, ecx (set to MPERF register index 0 to avoid GP) */
+                0x9C,                                     /* 4:  pushfd */
+                0x81, 0x0C, 0x24, 0x00, 0x01, 0x00, 0x00, /* 5:  or dword ptr [esp], 0x100 (sets TF) */
+                0x9D,                                     /* 12: popfd */
+                0x0F, 0x01, 0xFD,                         /* 13: rdpru */
+                0xC7, 0xB2,                               /* 16: db 0xC7, 0xB2 (invalid opcode) */
+                0xC3                                      /* 18: ret */
             };
         #endif
     #elif (ARM32)
@@ -11647,10 +11684,19 @@ public:
         };
 
         volatile ULONG_PTR trap_ip = 0;
+        bool rdpru_available = false;
+        if (cpu::is_amd()) {
+            u32 a = 0, b = 0, c = 0, d = 0;
+            cpu::cpuid(a, b, c, d, cpu::leaf::ext_limits);
+            rdpru_available = ((b & (1 << 4)) != 0);
+        }
     #endif
+
     #if (x86_32) && !(CLANG || GCC)
+        bool hypervisor_detected = false;
         ULONG_PTR baremetal_target_ip = 0;
 
+        trap_ip = 0;
         __try {
             __asm {
                 mov dword ptr[baremetal_target_ip], offset baremetal_target /* get exact bare metal trap target address dynamically */
@@ -11672,26 +11718,72 @@ public:
         }
         __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
 
-        /*
-         * Hypervisor is detected if the trap fired at any IP differing from the expected bare metal target
-         * OR if the single step exception never fired at all (trap_ip == 0)
-         */
-        return (trap_ip == 0 || trap_ip != baremetal_target_ip);
+        if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+            hypervisor_detected = true;
+        }
+
+        if (rdpru_available) {
+            trap_ip = 0; /* Reset trap_ip before the second run so that trap_ip is not overwritten if first run detects a hypervisor but second run doesn't */
+            __try {
+                __asm {
+                    mov dword ptr[baremetal_target_ip], offset baremetal_target_rdpru
+                    push ebx
+                    xor ecx, ecx /* Set ECX to index 0 (MPERF) to prevent #GP */
+                    xor eax, eax
+                    mov ax, ss
+                    pushfd
+                    or dword ptr[esp], 0x100 /* set TF */
+                    popfd
+                    mov ss, ax /* shadow starts */
+                    _emit 0x0F
+                    _emit 0x01
+                    _emit 0xFD
+                    baremetal_target_rdpru :
+                    pop ebx /* bare metal delays the #DB until here */
+                        nop
+                        pushfd
+                        and dword ptr[esp], 0xFFFFFEFF
+                        popfd
+                }
+            }
+            __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+
+            if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+                hypervisor_detected = true;
+            }
+        }
+
+        return hypervisor_detected;
 
     #elif (x86_64) || ((x86_32) && (CLANG || GCC))
-        /* Expect the trap explicitly at offset +18 (pop rbx) because of shadow suppression on real hardware */
-        const ULONG_PTR baremetal_target_ip = reinterpret_cast<ULONG_PTR>(blockstep_stub) + 18;
+        bool hypervisor_detected = false;
+        ULONG_PTR baremetal_target_ip = 0;
 
+        trap_ip = 0;
+        baremetal_target_ip = reinterpret_cast<ULONG_PTR>(cpuid_blockstep_stub) + 18;
         __try {
-            memory::execute(blockstep_stub);
+            memory::execute(cpuid_blockstep_stub);
         }
         __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
 
-        /*
-         * Hypervisor is detected if execution trapped at any offset other than expected bare metal
-         * OR if the single step exception never fired at all (trap_ip == 0)
-         */
-        return (trap_ip == 0 || trap_ip != baremetal_target_ip);
+        if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+            hypervisor_detected = true;
+        }
+
+        if (rdpru_available) {
+            trap_ip = 0; 
+            baremetal_target_ip = reinterpret_cast<ULONG_PTR>(rdpru_blockstep_stub) + 21;
+            __try {
+                memory::execute(rdpru_blockstep_stub);
+            }
+            __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+
+            if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+                hypervisor_detected = true;
+            }
+        }
+
+        return hypervisor_detected;
     #else
         return false;
     #endif
@@ -13660,9 +13752,6 @@ public:
             return false;
         }
 
-        bool is_vm = true;
-        DWORD exc_code = 0;
-
         struct handler {
             static LONG execute(const EXCEPTION_POINTERS* info, DWORD* exceptionCode) {
                 *exceptionCode = info->ExceptionRecord->ExceptionCode;
@@ -13675,21 +13764,50 @@ public:
             }
         };
 
+        bool cpuid_is_vm = true;
+        DWORD exc_code_cpuid = 0;
+
         __try {
-            memory::execute(singlestep_stub);
+            memory::execute(cpuid_singlestep_stub);
             /* If the hypervisor completely swallows all exceptions, is_vm still remains true */
         }
-        __except (handler::execute(GetExceptionInformation(), &exc_code)) {
+        __except (handler::execute(GetExceptionInformation(), &exc_code_cpuid)) {
             /*
              * If the exception doesnt reach this block, hypervisor delayed the trap flag over cpuid, execution fell through into
              * the bad bytes (C7 B2) causing STATUS_ILLEGAL_INSTRUCTION
              */
-            if (exc_code == EXCEPTION_SINGLE_STEP) {
-                is_vm = false; /* trap flag single-step exception triggered on CPUID */
+            if (exc_code_cpuid == EXCEPTION_SINGLE_STEP) {
+                cpuid_is_vm = false; /* trap flag single-step exception triggered on CPUID */
             }
         }
 
-        return is_vm;
+        bool rdpru_available = false;
+        if (!cpuid_is_vm && cpu::is_amd()) {
+            u32 a = 0, b = 0, c = 0, d = 0;
+            cpu::cpuid(a, b, c, d, cpu::leaf::ext_limits);
+            rdpru_available = ((b & (1 << 4)) != 0);
+        }
+        else {
+            return cpuid_is_vm;
+        }
+
+        bool rdpru_is_vm = false;
+
+        if (rdpru_available) {
+            rdpru_is_vm = true;
+            DWORD exc_code_rdpru = 0;
+
+            __try {
+                memory::execute(rdpru_singlestep_stub);
+            }
+            __except (handler::execute(GetExceptionInformation(), &exc_code_rdpru)) {
+                if (exc_code_rdpru == EXCEPTION_SINGLE_STEP) {
+                    rdpru_is_vm = false;
+                }
+            }
+        }
+
+        return rdpru_is_vm;
     #endif
     }
 
