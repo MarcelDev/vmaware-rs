@@ -8562,10 +8562,43 @@ public:
                         return core::add(brand_enum::QEMU);
                     }
 
-                    /* QEMU System Management Interrupt Resources Reservation string */
-                    if (find_pattern("SMI resources", 13)) {
+                    /* QEMU System Management Interrupt Resources/Interface Reservation string or wildcard _UID and PNP0A06 device association */
+                    if (find_pattern("SMI resources", 13) || find_pattern("SMI interface", 13)) {
                         debug("FIRMWARE: Detected QEMU SMI Resources reservation string");
                         return core::add(brand_enum::QEMU);
+                    }
+                    else {
+                        constexpr u8 pnp0a06_eisa[] = { 0x0C, 0x41, 0xD0, 0x0A, 0x06 }; /* EISAID("PNP0A06") */
+                        constexpr u8 uid_signature[] = { 0x08, 0x5F, 0x55, 0x49, 0x44 }; /* NameOp (0x08) + "_UID" */
+
+                        /* Simple search helper for pnp0a06_eisa sequence */
+                        auto find_eisa = [&]() noexcept -> const u8* {
+                            if (buffer_len < sizeof(pnp0a06_eisa)) return nullptr;
+                            for (size_t i = 0; i <= buffer_len - sizeof(pnp0a06_eisa); ++i) {
+                                if (memcmp(buffer + i, pnp0a06_eisa, sizeof(pnp0a06_eisa)) == 0) {
+                                    return buffer + i;
+                                }
+                            }
+                            return nullptr;
+                        };
+
+                        const u8* pnp_ptr = find_eisa();
+                        if (pnp_ptr) {
+                            const size_t pnp_offset = static_cast<size_t>(pnp_ptr - buffer);
+                            /* Search for the _UID name declaration within a 128-byte scope surrounding the HID */
+                            const size_t search_start = pnp_offset >= 64 ? pnp_offset - 64 : 0;
+                            const size_t search_end = pnp_offset + 64 <= buffer_len ? pnp_offset + 64 : buffer_len;
+
+                            for (size_t i = search_start; i + 8 < search_end; ++i) {
+                                if (memcmp(buffer + i, uid_signature, sizeof(uid_signature)) == 0) {
+                                    /* Check if the _UID value is a string (represented by 0x0D StringPrefix in AML) starting with "SM" */
+                                    if (buffer[i + 5] == 0x0D && buffer[i + 6] == 'S' && buffer[i + 7] == 'M') {
+                                        debug("FIRMWARE: Detected QEMU generic device containing SMI string unique identifier");
+                                        return core::add(brand_enum::QEMU);
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     /* QEMU Hotplug Resource Description strings */
@@ -8578,56 +8611,59 @@ public:
                         return core::add(brand_enum::QEMU);
                     }
 
-                    /* PRTP and PRTA 128-element routing mapping */
-                    const u8* prtp_ptr = static_cast<const u8*>(memchr(buffer, 'P', buffer_len));
-                    while (prtp_ptr) {
-                        const size_t offset = static_cast<size_t>(prtp_ptr - buffer);
-                        if (offset + 10 <= buffer_len && memcmp(prtp_ptr, "PRTP", 4) == 0) {
-                            if (offset >= 1 && *(prtp_ptr - 1) == 0x08 && prtp_ptr[4] == 0x12) {
-                                bool found_128 = false;
-                                for (size_t k = 5; k < 10 && offset + k < buffer_len; ++k) {
-                                    if (prtp_ptr[k] == 0x80) { found_128 = true; break; }
-                                }
-                                if (found_128) {
-                                    const u8* prta_ptr = static_cast<const u8*>(memchr(buffer, 'P', buffer_len));
-                                    while (prta_ptr) {
-                                        const size_t prta_offset = static_cast<size_t>(prta_ptr - buffer);
-                                        if (prta_offset + 10 <= buffer_len && memcmp(prta_ptr, "PRTA", 4) == 0) {
-                                            if (prta_offset >= 1 && *(prta_ptr - 1) == 0x08 && prta_ptr[4] == 0x12) {
-                                                for (size_t j = 5; j < 10 && prta_offset + j < buffer_len; ++j) {
-                                                    if (prta_ptr[j] == 0x80) {
-                                                        debug("FIRMWARE: Detected QEMU 128-element PRTP and PRTA routing tables");
-                                                        return core::add(brand_enum::QEMU);
-                                                    }
-                                                }
+                    /* PRTP and PRTA variable-size relative symmetry check (replaces old exact-128 check) */
+                    {
+                        auto get_package_size = [&](const char* name) noexcept -> u8 {
+                            const u8* name_ptr = static_cast<const u8*>(memchr(buffer, name[0], buffer_len));
+                            while (name_ptr) {
+                                const size_t offset = static_cast<size_t>(name_ptr - buffer);
+                                if (offset + 10 <= buffer_len && memcmp(name_ptr, name, 4) == 0) {
+                                    /* Confirm it represents NameOp (0x08) and PackageOp (0x12) */
+                                    if (offset >= 1 && *(name_ptr - 1) == 0x08 && name_ptr[4] == 0x12) {
+                                        /* Scan a small window following the PackageOp for a realistic element count (32 to 255) */
+                                        for (size_t k = 5; k < 12 && offset + k < buffer_len; ++k) {
+                                            if (name_ptr[k] >= 32 && name_ptr[k] <= 255) {
+                                                return name_ptr[k];
                                             }
-                                        }
-                                        if (prta_offset + 1 < buffer_len) {
-                                            prta_ptr = static_cast<const u8*>(memchr(prta_ptr + 1, 'P', buffer_len - (prta_offset + 1)));
-                                        }
-                                        else {
-                                            prta_ptr = nullptr;
                                         }
                                     }
                                 }
+                                if (offset + 1 < buffer_len) {
+                                    name_ptr = static_cast<const u8*>(memchr(name_ptr + 1, name[0], buffer_len - (offset + 1)));
+                                }
+                                else {
+                                    name_ptr = nullptr;
+                                }
                             }
-                        }
-                        if (offset + 1 < buffer_len) {
-                            prtp_ptr = static_cast<const u8*>(memchr(prtp_ptr + 1, 'P', buffer_len - (offset + 1)));
-                        }
-                        else {
-                            prtp_ptr = nullptr;
+                            return 0;
+                        };
+
+                        const u8 prtp_size = get_package_size("PRTP");
+                        const u8 prta_size = get_package_size("PRTA");
+
+                        if (prtp_size != 0 && prtp_size == prta_size) {
+                            debug("FIRMWARE: Detected QEMU routing symmetry (PRTP and PRTA matching size ", (int)prtp_size, ")");
+                            return core::add(brand_enum::QEMU);
                         }
                     }
 
-                    /* HPET dynamic check logic (VEND / PRD threshold) */
+                    /* HPET dynamic check logic (VEND / PRD threshold) with a constant-agnostic structural _STA check */
                     if (find_pattern("HPET", 4)) {
-                        constexpr u8 hpet_mmio[] = { 0x0C, 0x00, 0x00, 0xD0, 0xFE }; // 0x0C (DWordPrefix) followed by 0xFED00000
-                        constexpr u8 hpet_threshold[] = { 0x0C, 0x00, 0xE1, 0xF5, 0x05 }; // 0x0C (DWordPrefix) followed by 0x05F5E100 (100,000,000)
-                        if (find_pattern(reinterpret_cast<const char*>(hpet_mmio), sizeof(hpet_mmio)) &&
-                            find_pattern(reinterpret_cast<const char*>(hpet_threshold), sizeof(hpet_threshold))) {
-                            debug("FIRMWARE: Detected QEMU dynamic HPET validation checks");
-                            return core::add(brand_enum::QEMU);
+                        /* Search the buffer for: LEqualOp (0x93), Local1 (0x61), ZeroOp (0x00) */
+                        /* followed closely by LGreaterOp (0x94), Local1 (0x61) */
+                        const u8* ptr = buffer;
+                        const size_t end_offset = buffer_len >= 12 ? buffer_len - 12 : 0;
+
+                        for (size_t i = 0; i < end_offset; ++i) {
+                            if (ptr[i] == 0x93 && ptr[i + 1] == 0x61 && ptr[i + 2] == 0x00) {
+                                /* Scan a tight window ahead to find the companion LGreater(Local1, <any integer>) */
+                                for (size_t j = 3; j < 12 && i + j + 1 < buffer_len; ++j) {
+                                    if (ptr[i + j] == 0x94 && ptr[i + j + 1] == 0x61) {
+                                        debug("FIRMWARE: Detected QEMU HPET structural register-validation loop");
+                                        return core::add(brand_enum::QEMU);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -8806,11 +8842,11 @@ public:
 
                             u8 source_mask = 0;
                             switch (source) {
-                            case 5:  source_mask = 1u << 0; break;
-                            case 9:  source_mask = 1u << 1; break;
-                            case 10: source_mask = 1u << 2; break;
-                            case 11: source_mask = 1u << 3; break;
-                            default: break;
+                                case 5:  source_mask = 1u << 0; break;
+                                case 9:  source_mask = 1u << 1; break;
+                                case 10: source_mask = 1u << 2; break;
+                                case 11: source_mask = 1u << 3; break;
+                                default: break;
                             }
 
                             /*
@@ -8939,17 +8975,12 @@ public:
         constexpr long MAX_TABLE_SIZE = static_cast<long>(8 * 1024 * 1024);
 
         while ((entry = readdir(raw_dir)) != nullptr) {
-            if (
-                (strcmp(entry->d_name, ".") == 0) ||
-                (strcmp(entry->d_name, "..") == 0)
-                ) {
+            if ((strcmp(entry->d_name, ".") == 0) || (strcmp(entry->d_name, "..") == 0)) {
                 continue;
             }
 
             char path[PATH_MAX];
-            snprintf(path, sizeof(path),
-                "/sys/firmware/acpi/tables/%s",
-                entry->d_name);
+            snprintf(path, sizeof(path), "/sys/firmware/acpi/tables/%s", entry->d_name);
 
             const int fd = open(path, O_RDONLY);
             if (fd == -1) {
