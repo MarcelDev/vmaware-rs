@@ -1166,10 +1166,7 @@ public:
              *
              * left-trim only to handle stupid whitespaces before the brand string in ARM CPUs (Virtual CPUs)
              */
-            const char* start_ptr = buffer;
-            while (*start_ptr && std::isspace(static_cast<u8>(*start_ptr))) {
-                ++start_ptr;
-            }
+            const char* start_ptr = util::string::ltrim(buffer);
 
             memo::cpu_brand::store(start_ptr);
             debug("CPU: ", start_ptr);
@@ -1280,7 +1277,7 @@ public:
 
             if (cpu::is_intel()) {
                 /* Ultra */
-                if (strstr(brand, "Ultra") &&
+                if (util::string::find(brand, "Ultra") &&
                     strpbrk(brand, "0123456789")) {
                     result.found = true;
                     result.string = brand;
@@ -1308,7 +1305,7 @@ public:
                 }
             }
             else if (cpu::is_amd()) {
-                if (strstr(brand, "AMD Ryzen")) {
+                if (util::string::find(brand, "AMD Ryzen")) {
                     result.found = true;
                     result.is_ryzen = true;
                     result.string = brand;
@@ -3177,10 +3174,12 @@ public:
             if (VMAWARE_UNLIKELY(flag > enum_size)) {
                 return { false, 0, false, brand_enum::NULL_BRAND };
             }
+
             if (VMAWARE_LIKELY(cache_table[flag].has_value)) {
                 const auto& entry = cache_table[flag];
                 return { entry.result, entry.points, true, entry.brand_name };
             }
+
             return { false, 0, false, brand_enum::NULL_BRAND };
             return { false, 0, false, brand_enum::NULL_BRAND };
         }
@@ -3274,9 +3273,11 @@ public:
                 str_copy(brand_cache, s, sizeof(brand_cache));
                 cached = true;
             }
+
             static bool is_cached() noexcept {
                 return cached; 
             }
+
             static const char* fetch() noexcept {
                 return brand_cache; 
             }
@@ -3302,10 +3303,12 @@ public:
             static hyperx_state fetch() noexcept {
                 return state; 
             }
+
             static void store(const hyperx_state p_state) noexcept {
                 state = p_state;
                 cached = true;
             }
+
             static bool is_cached() noexcept {
                 return cached;
             }
@@ -3330,6 +3333,7 @@ public:
                         return true;
                     }
                 }
+
                 return false;
             }
 
@@ -3353,10 +3357,19 @@ public:
             }
         };
 
+    #if (WINDOWS)
         struct bios_info {
             static char manufacturer[256];
             static char model[128];
             static bool cached;
+
+            static constexpr const char* fetch_manufacturer() noexcept {
+                return manufacturer;
+            }
+
+            static constexpr const char* fetch_model() noexcept {
+                return model;
+            }
 
             static VMAWARE_CONSTEXPR void store_manufacturer(const char* VMAWARE_RESTRICT s) noexcept {
                 if (!s) { 
@@ -3372,6 +3385,7 @@ public:
                 *(manufacturer + tocopy) = '\0';
                 cached = true;
             }
+
             static VMAWARE_CONSTEXPR void store_model(const char* VMAWARE_RESTRICT s) noexcept {
                 if (!s) { 
                     model[0] = '\0';
@@ -3390,13 +3404,31 @@ public:
             static bool is_cached() noexcept {
                 return cached; 
             }
-            static constexpr const char* fetch_manufacturer() noexcept {
-                return manufacturer; 
+        };
+
+        struct module {
+            static HMODULE& fetch_ntdll() noexcept {
+                static HMODULE handle = nullptr;
+                return handle;
             }
-            static constexpr const char* fetch_model() noexcept {
-                return model; 
+
+            static HMODULE& fetch_kernel32() noexcept {
+                static HMODULE handle = nullptr;
+                return handle;
+            }
+
+            static void store(const HMODULE ntdll, const HMODULE kernel32) noexcept {
+                fetch_ntdll() = ntdll;
+                fetch_kernel32() = kernel32;
+                is_cached() = true;
+            }
+
+            static bool& is_cached() noexcept {
+                static bool cached = false;
+                return cached;
             }
         };
+    #endif
     };
 
 #if (WINDOWS)
@@ -3918,16 +3950,16 @@ public:
         };
 
         /* Retrieves the addresses of specified functions from a loaded module using the export directory, manual implementation of GetProcAddress without PE export forwarding parsing */
-        static void get_function_address(const HMODULE hModule, const char* const VMAWARE_RESTRICT names[], void** const VMAWARE_RESTRICT functions, const size_t count, const bool cache_result = true) {
+        static void get_function(const HMODULE module, const char* const VMAWARE_RESTRICT names[], void** const VMAWARE_RESTRICT functions, const size_t count, const bool cache_result = true) {
             VMAWARE_ASSUME(names != nullptr);
             VMAWARE_ASSUME(functions != nullptr);
             using func_map = std::unordered_map<std::string, void*>;
             static std::unordered_map<HMODULE, func_map> function_cache;
 
             for (size_t i = 0; i < count; ++i) functions[i] = nullptr;
-            if (!hModule) return;
+            if (!module) return;
 
-            BYTE* base = reinterpret_cast<BYTE*>(hModule);
+            BYTE* base = reinterpret_cast<BYTE*>(module);
 
             size_t module_size = 0;
             {
@@ -4017,7 +4049,7 @@ public:
 
                 /* Only query and populate the cache if it's not a dynamically loaded module with LoadLibraryEx */
                 if (cache_result) {
-                    func_map& module_cache = function_cache[hModule];
+                    func_map& module_cache = function_cache[module];
                     const auto cache_it = module_cache.find(s_name);
                     if (VMAWARE_LIKELY(cache_it != module_cache.end())) {
                         functions[i] = cache_it->second;
@@ -4056,7 +4088,7 @@ public:
                         functions[i] = addr;
 
                         if (cache_result) {
-                            function_cache[hModule][s_name] = addr;
+                            function_cache[module][s_name] = addr;
                         }
                         continue;
                     }
@@ -4064,138 +4096,235 @@ public:
             }
         }
 
-        [[nodiscard]] static HMODULE get_ntdll() noexcept {
-            static HMODULE cached_ntdll = nullptr;
-            if (VMAWARE_LIKELY(cached_ntdll != nullptr)) {
-                return cached_ntdll;
+        [[nodiscard]] static HMODULE get_module(const bool get_ntdll) noexcept {
+            struct custom_unicode_string {
+                unsigned short length;
+                unsigned short max_length;
+                wchar_t* buffer;
+            };
+
+            struct custom_ldr_entry {
+                void* reserved1[2];
+                LIST_ENTRY in_memory_links;
+                void* reserved2[2];
+                void* dll_base;
+                void* reserved3[2];
+                custom_unicode_string full_name;
+                custom_unicode_string base_name;
+            };
+
+            struct custom_peb {
+                unsigned char reserved1[2];
+                unsigned char being_debugged;
+                unsigned char reserved2[1];
+                void* mutant;
+                void* image_base_address;
+                struct {
+                    unsigned char reserved3[8];
+                    void* reserved4[3];
+                    LIST_ENTRY in_memory_list;
+                }*ldr;
+            };
+
+            if (memo::module::is_cached()) {
+                return get_ntdll ? memo::module::fetch_ntdll() : memo::module::fetch_kernel32();
             }
 
-        #ifndef _WINTERNL_
-            typedef struct _UNICODE_STRING {
-                USHORT Length;
-                USHORT MaximumLength;
-                PWSTR  Buffer;
-            } UNICODE_STRING, * PUNICODE_STRING;
+            custom_peb* peb = nullptr;
 
-            typedef struct _PEB_LDR_DATA {
-                BYTE Reserved1[8];
-                PVOID Reserved2[3];
-                LIST_ENTRY InMemoryOrderModuleList;
-            } PEB_LDR_DATA, * PPEB_LDR_DATA;
-
-            typedef struct _LDR_DATA_TABLE_ENTRY {
-                PVOID Reserved1[2];
-                LIST_ENTRY InMemoryOrderLinks;
-                PVOID Reserved2[2];
-                PVOID DllBase;
-                PVOID Reserved3[2];
-                UNICODE_STRING FullDllName;
-                BYTE Reserved4[8];
-                PVOID Reserved5[3];
-            #if (MSVC)
-                #pragma warning(suppress: 4201)
+        #if (x86_64)
+            #if (MSVC && !CLANG)
+                peb = reinterpret_cast<custom_peb*>(__readgsqword(0x60));
+            #else
+                asm("movq %%gs:0x60, %0" : "=r"(peb));
             #endif
-                union {
-                    ULONG CheckSum;
-                    PVOID Reserved6;
-                } DUMMYUNIONNAME;
-                ULONG TimeDateStamp;
-            } LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
-
-            typedef struct _PEB {
-                BYTE Reserved1[2];
-                BYTE BeingDebugged;
-                BYTE Reserved2[1];
-                PVOID Reserved3[2];
-                PPEB_LDR_DATA Ldr;
-            } PEB, * PPEB;
-        #endif
-
-            PPEB peb = nullptr;
-
-    #if (x86_64)
-        #if (MSVC && !CLANG)
-            peb = reinterpret_cast<PPEB>(__readgsqword(0x60));
-        #else
-            asm("movq %%gs:0x60, %0" : "=r"(peb));
-        #endif
-            #elif (x86_32)
-        #if (MSVC&& !CLANG)
-            peb = reinterpret_cast<PPEB>(__readfsdword(0x30));
-        #else
-            asm("movl %%fs:0x30, %0" : "=r"(peb));
-        #endif
-    #endif
-
-            if (VMAWARE_UNLIKELY(!peb)) { /* not x86 or tampered with */
-                const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-                if (ntdll) cached_ntdll = ntdll;
-                return ntdll;
-            }
-            VMAWARE_ASSUME(peb != nullptr);
-
-            PPEB_LDR_DATA ldr = peb->Ldr;
-            if (!ldr) {
-                const HMODULE h = GetModuleHandleW(L"ntdll.dll");
-                if (h) cached_ntdll = h;
-                return h;
-            }
-
-            #ifndef CONTAINING_RECORD
-                #define CONTAINING_RECORD(address, type, field) ((type *)((char*)(address) - (size_t)(&((type *)0)->field)))
+        #elif (x86_32)
+            #if (MSVC && !CLANG)
+                peb = reinterpret_cast<custom_peb*>(__readfsdword(0x30));
+            #else
+                asm("movl %%fs:0x30, %0" : "=r"(peb));
             #endif
+        #endif
 
-            constexpr WCHAR target_name[] = L"ntdll.dll";
-            constexpr size_t target_length = (std::size(target_name) - 1);
+            if (!peb || !peb->ldr) {
+                return GetModuleHandleW(get_ntdll ? L"ntdll.dll" : L"kernel32.dll");
+            }
 
-            LIST_ENTRY* head = &ldr->InMemoryOrderModuleList;
-            /*
-             * Static analyzers don't know that InMemoryOrderModuleList is a circular list managed by the loader
-             * so they conservatively assume head->Flink or some cur->Flink might be nullptr
-             */
+            auto matches = [](const wchar_t* s1, const wchar_t* s2, const unsigned short len) noexcept -> bool {
+                for (unsigned short i = 0; i < len; ++i) {
+                    if ((s1[i] | 0x20) != (s2[i] | 0x20)) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            HMODULE res_ntdll = nullptr;
+            HMODULE res_k32 = nullptr;
+
+            LIST_ENTRY* head = &peb->ldr->in_memory_list;
             for (LIST_ENTRY* cur = head->Flink; cur != nullptr && cur != head; cur = cur->Flink) {
-                auto* ent = CONTAINING_RECORD(cur, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
-                if (!ent) continue;
-
-                auto* fullname = &ent->FullDllName;
-                if (!fullname->Buffer || fullname->Length == 0) continue;
-
-                const auto total_chars = static_cast<USHORT>(fullname->Length / sizeof(WCHAR));
-
-                size_t start = total_chars;
-                while (start > 0) {
-                    const WCHAR c = fullname->Buffer[start - 1];
-                    if (c == L'\\' || c == L'/') break;
-                    --start;
+                auto* ent = reinterpret_cast<custom_ldr_entry*>(reinterpret_cast<char*>(cur) - (sizeof(void*) * 2));
+                if (!ent || !ent->base_name.buffer || ent->base_name.length == 0) {
+                    continue;
                 }
 
-                const size_t file_length = total_chars - start;
-                if (file_length != target_length) continue;
+                const unsigned short len_chars = ent->base_name.length / sizeof(wchar_t);
+                const wchar_t* buf = ent->base_name.buffer;
 
-                bool match = true;
-                for (size_t i = 0; i < file_length; ++i) {
-                    WCHAR a = fullname->Buffer[start + i];
-                    WCHAR b = target_name[i];
-                    if (a >= L'A' && a <= L'Z') a = static_cast<WCHAR>(a + 32);
-                    if (b >= L'A' && b <= L'Z') b = static_cast<WCHAR>(b + 32);
-                    if (a != b) { match = false; break; }
+                if ((len_chars == 9 && matches(buf, L"ntdll.dll", 9)) || (len_chars == 5 && matches(buf, L"ntdll", 5))) {
+                    res_ntdll = reinterpret_cast<HMODULE>(ent->dll_base);
+                }
+                else if ((len_chars == 12 && matches(buf, L"kernel32.dll", 12)) || (len_chars == 8 && matches(buf, L"kernel32", 8))) {
+                    res_k32 = reinterpret_cast<HMODULE>(ent->dll_base);
                 }
 
-                if (match) {
-                    cached_ntdll = reinterpret_cast<HMODULE>(ent->DllBase);
-                    return cached_ntdll;
+                if (res_ntdll && res_k32) {
+                    break;
                 }
             }
 
-            const HMODULE h = GetModuleHandleW(L"ntdll.dll");
-            if (h) cached_ntdll = h;
-            return h;
+            if (res_ntdll || res_k32) {
+                memo::module::store(res_ntdll, res_k32);
+            }
+
+            if (get_ntdll) {
+                return res_ntdll ? res_ntdll : GetModuleHandleW(L"ntdll.dll");
+            }
+            return res_k32 ? res_k32 : GetModuleHandleW(L"kernel32.dll");
         }
     };
 #endif
 
     /* Miscellaneous functionalities */
     struct util {
+        struct string {
+            /* Converts a single character to lowercase */
+            static VMAWARE_FORCE_INLINE char to_lower(char c) noexcept {
+                return (c >= 'A' && c <= 'Z') ? static_cast<char>(c | 0x20) : c;
+            }
+
+            /* Converts a single character to uppercase */
+            static VMAWARE_FORCE_INLINE char to_upper(char c) noexcept {
+                return (c >= 'a' && c <= 'z') ? static_cast<char>(c & 0xDF) : c;
+            }
+
+            /* Checks if a string starts with a specific prefix (case-sensitive) */
+            static VMAWARE_FORCE_INLINE bool starts_with(const char* str, const char* prefix) noexcept {
+                if (!str || !prefix) return false;
+                while (*prefix) {
+                    if (*str++ != *prefix++) return false;
+                }
+                return true;
+            }
+
+            /* Checks if a string starts with a specific prefix (case-insensitive) */
+            static VMAWARE_FORCE_INLINE bool starts_with_ci(const char* str, const char* prefix) noexcept {
+                if (!str || !prefix) return false;
+                while (*prefix) {
+                    if (to_lower(*str++) != to_lower(*prefix++)) return false;
+                }
+                return true;
+            }
+
+            /* Finds a substring inside a null-terminated string (case-sensitive) */
+            static const char* find(const char* haystack, const char* needle) noexcept {
+                if (!haystack || !needle) return nullptr;
+                if (!*needle) return haystack;
+                for (; *haystack; ++haystack) {
+                    if (*haystack == *needle) {
+                        const char* h = haystack;
+                        const char* n = needle;
+                        while (*h && *n && *h == *n) {
+                            h++;
+                            n++;
+                        }
+                        if (!*n) return haystack;
+                    }
+                }
+                return nullptr;
+            }
+
+            /* Finds a substring inside a null-terminated string (case-insensitive) */
+            static const char* find_ci(const char* haystack, const char* needle) noexcept {
+                if (!haystack || !needle) return nullptr;
+                if (!*needle) return haystack;
+                const char n0_lower = to_lower(*needle);
+                for (; *haystack; ++haystack) {
+                    if (to_lower(*haystack) == n0_lower) {
+                        const char* h = haystack;
+                        const char* n = needle;
+                        while (*h && *n && to_lower(*h) == to_lower(*n)) {
+                            h++;
+                            n++;
+                        }
+                        if (!*n) return haystack;
+                    }
+                }
+                return nullptr;
+            }
+
+            /* Checks if a std::string contains a substring (case-sensitive) */
+            static VMAWARE_FORCE_INLINE bool contains(const std::string& base_str, const char* keyword) noexcept {
+                return base_str.find(keyword) != std::string::npos;
+            }
+
+            /* Checks if a std::string contains a substring (case-insensitive) */
+            static VMAWARE_FORCE_INLINE bool contains_ci(const std::string& base_str, const char* keyword) noexcept {
+                return find_ci(base_str.c_str(), keyword) != nullptr;
+            }
+
+            /* Compares two null-terminated strings for equality (case-insensitive) */
+            static bool equals_ci(const char* s1, const char* s2) noexcept {
+                if (!s1 || !s2) return s1 == s2;
+                while (*s1 && *s2) {
+                    if (to_lower(*s1) != to_lower(*s2)) return false;
+                    s1++;
+                    s2++;
+                }
+                return *s1 == *s2;
+            }
+
+            /* Converts a std::string to lowercase in place */
+            static VMAWARE_FORCE_INLINE void to_lower_inplace(std::string& str) noexcept {
+                const size_t len = str.length();
+                for (size_t i = 0; i < len; ++i) {
+                    str[i] = to_lower(str[i]);
+                }
+            }
+
+            /* Trims leading and trailing whitespaces from a std::string in place */
+            static void trim_inplace(std::string& s) noexcept {
+                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+                    s.erase(s.begin());
+                }
+                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+                    s.pop_back();
+                }
+            }
+
+            /* Trims leading whitespaces from a null-terminated string pointer */
+            static const char* ltrim(const char* str) noexcept {
+                if (!str) return nullptr;
+                while (*str && std::isspace(static_cast<unsigned char>(*str))) {
+                    str++;
+                }
+                return str;
+            }
+
+            /* Checks if a std::string consists only of numerical digits */
+            static bool is_numeric(const std::string& s) noexcept {
+                if (s.empty()) return false;
+                const size_t len = s.length();
+                for (size_t i = 0; i < len; ++i) {
+                    if (!std::isdigit(static_cast<unsigned char>(s[i]))) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        };
+
         [[nodiscard]] static constexpr bool is_unsupported(const VM::enum_flags flag) noexcept {
             return (flag >= VM::HYPERVISOR_BIT && flag <= VM::KGT_SIGNATURE) ? false :
             #if (LINUX)
@@ -4328,7 +4457,7 @@ public:
 
         [[nodiscard]] static bool find(const std::string& base_str, const char* keyword) noexcept {
             VMAWARE_ASSUME(keyword != nullptr);
-            return (base_str.find(keyword) != std::string::npos);
+            return string::contains(base_str, keyword);
         };
 
         [[nodiscard]] static i32 popcount(u64 v) noexcept {
@@ -4530,7 +4659,7 @@ public:
                         continue;
                     }
             #endif
-                if (!std::all_of(filename.begin(), filename.end(), [](u8 c) { return std::isdigit(c); })) {
+                if (!util::string::is_numeric(filename)) 
                     continue;
                 }
 
@@ -4584,7 +4713,7 @@ public:
             static const bool cached = []() -> bool {
             #if (WINDOWS)
                 const char* brand = cpu::get_brand();
-                if (brand && strstr(brand, "Virtual CPU")) {
+                if (brand && util::string::find(brand, "Virtual CPU")) {
                     return true;
                 }
 
@@ -4594,7 +4723,7 @@ public:
                     USHORT proc_machine = 0;
                     USHORT native_machine = 0;
 
-                    const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+                    const HMODULE kernel32 = memory::get_module(false);
                     if (kernel32) {
                         using is_wow_64_process_2_fn = BOOL(__stdcall*)(HANDLE, USHORT*, USHORT*);
                         is_wow_64_process_2_fn is_wow_64_process_2 = reinterpret_cast<is_wow_64_process_2_fn>(GetProcAddress(kernel32, "IsWow64Process2"));
@@ -4610,10 +4739,10 @@ public:
                     }
 
                     if (native_machine == IMAGE_FILE_MACHINE_ARM64 || native_machine == IMAGE_FILE_MACHINE_ARMNT) {
-                        if (HMODULE ntdll = memory::get_ntdll()) {
+                        if (HMODULE ntdll = memory::get_module(true)) {
                             constexpr const char* function_names[] = { "NtQueryInformationProcess" };
                             void* functions[ARRAYSIZE(function_names)] = {};
-                            memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+                            memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
                             using nt_query_information_process_fn = NTSTATUS(__stdcall*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
                             auto nt_query_information_process = reinterpret_cast<nt_query_information_process_fn>(functions[0]);
@@ -4726,14 +4855,14 @@ public:
 
             /* Check if the HAL path HalpInitializeErrSrc->HalpInitializeMce->HalpMceInit->HalpHvInitMcaPcrContext is initializing machine-check/WHEA state in a hypervisor-aware context */
             auto is_halh_present = []() noexcept -> bool {
-                const HMODULE ntdll = memory::get_ntdll();
+                const HMODULE ntdll = memory::get_module(true);
                 if (!ntdll) return true;
 
                 constexpr const char* function_names[] = {
                     "NtQuerySystemInformation"
                 };
                 void* functions[ARRAYSIZE(function_names)] = {};
-                memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+                memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
                 using nt_query_sysinfo_fn = NTSTATUS(__stdcall*)(ULONG, PVOID, ULONG, PULONG);
                 nt_query_sysinfo_fn nt_query_system_information = reinterpret_cast<nt_query_sysinfo_fn>(functions[0]);
@@ -4825,7 +4954,7 @@ public:
                 };
                 constexpr size_t function_count = sizeof(function_names) / sizeof(function_names[0]);
                 void* functions[function_count] = {};
-                memory::get_function_address(tbs_module, function_names, functions, function_count);
+                memory::get_function(tbs_module, function_names, functions, function_count);
 
                 const pfn_tbsi_get_tcg_log_ex get_tcg_log_ex = reinterpret_cast<pfn_tbsi_get_tcg_log_ex>(functions[0]);
                 const pfn_tbsi_context_create context_create = reinterpret_cast<pfn_tbsi_context_create>(functions[1]);
@@ -4843,7 +4972,7 @@ public:
 
                 if (get_tcg_log_ex) {
                     hr = get_tcg_log_ex(0, nullptr, &log_size);
-                    if ((hr == 0 || hr == 0x80284005) && log_size > 0) {
+                    if ((hr == 0 || hr == static_cast<decltype(hr)>(0x80284005)) && log_size > 0) {
                         log_buffer = new u8[log_size];
                         hr = get_tcg_log_ex(0, log_buffer, &log_size);
                     }
@@ -4855,7 +4984,7 @@ public:
                     hr = context_create(&params, &context);
                     if (hr == 0) {
                         hr = get_tcg_log(context, nullptr, &log_size);
-                        if ((hr == 0 || hr == 0x80284005) && log_size > 0) {
+                        if ((hr == 0 || hr == static_cast<decltype(hr)>(0x80284005)) && log_size > 0) {
                             log_buffer = new u8[log_size];
                             hr = get_tcg_log(context, log_buffer, &log_size);
                         }
@@ -5049,12 +5178,12 @@ public:
 
     #if (WINDOWS)
         [[nodiscard]] static bool is_windows_11() noexcept {
-            const HMODULE ntdll = memory::get_ntdll();
+            const HMODULE ntdll = memory::get_module(true);
             if (!ntdll) return false;
 
             const char* function_names[] = { "RtlGetVersion" };
             void* functions[ARRAYSIZE(function_names)] = {};
-            memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+            memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
             using rtl_get_version_fn = NTSTATUS(__stdcall*)(PRTL_OSVERSIONINFOW);
             const auto rtl_get_version = reinterpret_cast<rtl_get_version_fn>(functions[0]);
@@ -5067,12 +5196,12 @@ public:
         }
 
         [[nodiscard]] static bool is_windows_8_or_newer() noexcept {
-            const HMODULE ntdll = memory::get_ntdll();
+            const HMODULE ntdll = memory::get_module(true);
             if (!ntdll) return false;
 
             const char* function_names[] = { "RtlGetVersion" };
             void* functions[ARRAYSIZE(function_names)] = {};
-            memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+            memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
             using rtl_get_version_fn = NTSTATUS(__stdcall*)(PRTL_OSVERSIONINFOW);
             const auto rtl_get_version = reinterpret_cast<rtl_get_version_fn>(functions[0]);
@@ -5118,11 +5247,12 @@ public:
             auto is_placeholder = [](const char* s) noexcept -> bool {
                 if (!s || !*s) return true;
 
-                return _stricmp(s, "System Product Name") == 0 ||
-                    _stricmp(s, "To Be Filled By O.E.M.") == 0 ||
-                    _stricmp(s, "Default string") == 0 ||
-                    _stricmp(s, "Not Specified") == 0 ||
-                    _stricmp(s, "None") == 0;
+                return 
+                    util::string::equals_ci(s, "System Product Name") ||
+                    util::string::equals_ci(s, "To Be Filled By O.E.M.") ||
+                    util::string::equals_ci(s, "Default string") ||
+                    util::string::equals_ci(s, "Not Specified") ||
+                    util::string::equals_ci(s, "None");
             };
 
             auto read_reg_utf8 = [](const wchar_t* value_name, char* out, size_t out_size) noexcept -> bool {
@@ -5737,7 +5867,7 @@ public:
              return false;
          }
 
-         if (strncmp(brand, "QEMU Virtual CPU version", 24) == 0) {
+         if (util::string::starts_with(brand, "QEMU Virtual CPU version")) {
              return core::add(brand_enum::QEMU);
          }
 
@@ -5756,15 +5886,17 @@ public:
          };
 
          for (const auto& c : checks) {
-             if (strstr(brand, c.text)) {
+             if (util::string::find(brand, c.text)) {
                  debug("CPU_BRAND: match = ", c.text);
                  return core::add(c.brand);
              }
          }
 
-         if (strstr(brand, "monitor") ||
-             strstr(brand, "hypervisor") ||
-             strstr(brand, "hvisor"))
+         if (
+             util::string::find(brand, "monitor")    ||
+             util::string::find(brand, "hypervisor") ||
+             util::string::find(brand, "hvisor")
+            )
          {
              debug("CPU_BRAND: generic virtualization match");
              return true;
@@ -5930,44 +6062,64 @@ public:
         auto is_smt_active = []() noexcept -> bool {
         #if (WINDOWS)
             DWORD len = 0;
+
             if (GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len) ||
                 GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
                 return false;
             }
 
-            std::vector<unsigned char> buf(static_cast<size_t>(len));
-            if (!GetLogicalProcessorInformationEx(
-                RelationProcessorCore,
-                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()),
-                &len)) {
-                return false;
+            unsigned char* buf = nullptr;
+            bool result = false;
+
+            /* To support CPU hot-plugging */
+            while (true) {
+                buf = static_cast<unsigned char*>(_aligned_malloc(len, alignof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)));
+                if (!buf) {
+                    return false;
+                }
+
+                if (GetLogicalProcessorInformationEx(
+                    RelationProcessorCore,
+                    reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf),
+                    &len)) {
+                    break;
+                }
+
+                _aligned_free(buf);
+                buf = nullptr;
+
+                if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+                    return false;
+                }
             }
 
             size_t offset = 0;
-            while (offset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= static_cast<size_t>(len)) {
-                auto* rec = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + offset);
+            while (offset < len) {
+                auto* rec = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf + offset);
+
+                if (rec->Size == 0 || offset + rec->Size > len) {
+                    break;
+                }
 
                 if (rec->Relationship == RelationProcessorCore) {
                     const PROCESSOR_RELATIONSHIP& pr = rec->Processor;
                     unsigned logicals = 0;
 
                     for (WORD i = 0; i < pr.GroupCount; ++i) {
-                        logicals += util::popcount(static_cast<u64>(pr.GroupMask[i].Mask));
+                        logicals += util::popcount(static_cast<unsigned long long>(pr.GroupMask[i].Mask));
                     }
 
                     if (logicals > 1) {
-                        return true;
+                        result = true;
+                        break;
                     }
                 }
 
-                if (rec->Size == 0) {
-                    break;
-                }
-
-                offset += rec->Size;
+                offset += rec->Size; 
             }
 
-            return false;
+            _aligned_free(buf);
+            return result;
 
         #elif (APPLE)
 
@@ -5987,14 +6139,7 @@ public:
 
         #else
 
-            auto trim = [](std::string& s) {
-                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
-                    s.erase(s.begin());
-                }
-                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
-                    s.pop_back();
-                }
-                };
+            util::string::trim_inplace(s);
 
             {
                 std::ifstream f("/sys/devices/system/cpu/smt/control");
@@ -6200,8 +6345,8 @@ public:
         const u32 actual = memo::thread_count::fetch();
         const bool model_expects_smt = matched->smt;
 
-        if (model_expects_smt) {
-            if (!is_smt_active()) {
+        if (!model_expects_smt) {
+            if (is_smt_active()) {
                 debug("THREAD_MISMATCH: CPU normally runs under SMT, but SMT was fully disabled on BIOS");
                 return false;
             }
@@ -6493,7 +6638,6 @@ public:
             }
         }
 
-        debug("TIMER: CPU supports SERIALIZE: ", serialize_available);
     #if (x86_64) /* WHP stuff not available for x86_32 */
         using whv_create_partition_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE*);
         using whv_set_partition_property_fn = HRESULT(__stdcall*)(WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY_CODE, const void*, UINT32);
@@ -6529,7 +6673,7 @@ public:
 
         if (check_nested_hypervisors) {
             winhv_dll = LoadLibraryExW(L"WinHvPlatform.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-            ntdll_dll = memory::get_ntdll();
+            ntdll_dll = memory::get_module(true);
 
             if (!winhv_dll || !ntdll_dll) {
                 debug("TIMER: Not all modules required to run the nested check could be found");
@@ -6547,7 +6691,7 @@ public:
                     "WHvDeletePartition"  
                 };
                 void* whv_functions[ARRAYSIZE(whv_function_names)] = {};
-                memory::get_function_address(winhv_dll, whv_function_names, whv_functions, ARRAYSIZE(whv_function_names), false);
+                memory::get_function(winhv_dll, whv_function_names, whv_functions, ARRAYSIZE(whv_function_names), false);
 
                 constexpr const char* nt_function_names[] = {
                     "NtAllocateVirtualMemory",
@@ -6555,7 +6699,7 @@ public:
                     "NtQuerySystemTime"
                 };
                 void* nt_functions[ARRAYSIZE(nt_function_names)] = {};
-                memory::get_function_address(ntdll_dll, nt_function_names, nt_functions, ARRAYSIZE(nt_function_names));
+                memory::get_function(ntdll_dll, nt_function_names, nt_functions, ARRAYSIZE(nt_function_names));
 
                 whv_create_partition = reinterpret_cast<whv_create_partition_fn>(whv_functions[0]);
                 whv_set_partition_property = reinterpret_cast<whv_set_partition_property_fn>(whv_functions[1]);
@@ -6583,43 +6727,60 @@ public:
             }
 
             bool partition_ready = false;
-            if (whv_create_partition && SUCCEEDED(whv_create_partition(&p))) {
+            HRESULT hr = S_OK;
 
+            if (!whv_create_partition || FAILED(hr = whv_create_partition(&p))) {
+                debug("TIMER: WHvCreatePartition failed with 0x%08X", hr);
+            }
+            else {
                 UINT32 cpu_count = 1;
-                HRESULT hr = S_OK;
                 if (whv_set_partition_property) {
                     hr = whv_set_partition_property(p, WHvPartitionPropertyCodeProcessorCount, &cpu_count, sizeof(cpu_count));
+                    if (FAILED(hr)) {
+                        debug("TIMER: WHvSetPartitionProperty failed with 0x%08X", hr);
+                    }
                 }
 
-                if (SUCCEEDED(hr) && whv_setup_partition && SUCCEEDED(whv_setup_partition(p))) {
-                    if (whv_create_virtual_processor && SUCCEEDED(whv_create_virtual_processor(p, 0, 0))) {
-
-                        mem = nullptr;
-                        SIZE_T region_size = 0x2000; 
-                        NTSTATUS status = static_cast<NTSTATUS>(0xC0000001L);
-
-                        if (nt_allocate_virtual_memory) {
-                            status = nt_allocate_virtual_memory(
-                                current_process,
-                                &mem,
-                                0,
-                                &region_size,
-                                MEM_RESERVE | MEM_COMMIT,
-                                PAGE_READWRITE
-                            );
+                if (SUCCEEDED(hr) && whv_setup_partition) {
+                    hr = whv_setup_partition(p);
+                    if (FAILED(hr)) {
+                        debug("TIMER: WHvSetupPartition failed with 0x%08X", hr);
+                    }
+                    else if (whv_create_virtual_processor) {
+                        hr = whv_create_virtual_processor(p, 0, 0);
+                        if (FAILED(hr)) {
+                            debug("TIMER: WHvCreateVirtualProcessor failed with 0x%08X", hr);
                         }
+                        else {
+                            mem = nullptr;
+                            SIZE_T region_size = 0x2000;
+                            NTSTATUS status = static_cast<NTSTATUS>(0xC0000001L);
 
-                        if (NT_SUCCESS(status)) {
-                            constexpr auto flags = static_cast<WHV_MAP_GPA_RANGE_FLAGS>(7); /* Flags 7 = Read | Write | Execute) */
-                            if (whv_map_gpa_range && SUCCEEDED(whv_map_gpa_range(p, mem, 0, 0x2000, flags))) {
-                                partition_ready = true;
+                            if (nt_allocate_virtual_memory) {
+                                status = nt_allocate_virtual_memory(
+                                    current_process, 
+                                    &mem,
+                                    0,
+                                    &region_size,
+                                    MEM_RESERVE | MEM_COMMIT,
+                                    PAGE_EXECUTE_READWRITE 
+                                );
+                            }
+
+                            if (NT_SUCCESS(status)) {
+                                constexpr auto flags = static_cast<WHV_MAP_GPA_RANGE_FLAGS>(7);
+                                if (whv_map_gpa_range) {
+                                    hr = whv_map_gpa_range(p, mem, 0, 0x2000, flags);
+                                    if (SUCCEEDED(hr)) {
+                                        partition_ready = true;
+                                    }
+                                    else {
+                                        debug("TIMER: WHvMapGpaRange failed with 0x%08X", hr);
+                                    }
+                                }
                             }
                             else {
-                                if (nt_free_virtual_memory) {
-                                    SIZE_T free_size = 0;
-                                    nt_free_virtual_memory(current_process, &mem, &free_size, MEM_RELEASE);
-                                }
-                                mem = nullptr;
+                                debug("TIMER: NtAllocateVirtualMemory failed with 0x%08X", status);
                             }
                         }
                     }
@@ -7749,18 +7910,10 @@ public:
                 continue;
             }
 
-            char* data = &content[0];
-            const size_t len = content.size();
-
-            for (size_t i = 0; i < len; ++i) {
-                if (data[i] >= 'A' && data[i] <= 'Z') {
-                    data[i] |= 0x20;
-                }
-            }
+            util::string::to_lower_inplace(content);
 
             for (const auto& vm_string : vm_table) {
-                if (content.find(vm_string.first) != std::string::npos) {
-
+                if (util::string::contains(content, vm_string.first))
                     debug("DMI_SCAN: content = ", content);
 
                     if (vm_string.second == brand_enum::AWS_NITRO) {
@@ -8525,26 +8678,7 @@ public:
                         bool is_acer_aspire = false;
 
                         if (util::get_manufacturer_model(&man, &mod)) {
-                            auto str_contains = [](const char* haystack, const char* needle) noexcept -> bool {
-                                if (!haystack || !needle) return false;
-                                const size_t h_len = strlen(haystack);
-                                const size_t n_len = strlen(needle);
-                                if (n_len > h_len) return false;
-                                for (size_t i = 0; i <= h_len - n_len; ++i) {
-                                    size_t j = 0;
-                                    for (; j < n_len; ++j) {
-                                        char hc = haystack[i + j];
-                                        char nc = needle[j];
-                                        if (hc >= 'A' && hc <= 'Z') hc += 32;
-                                        if (nc >= 'A' && nc <= 'Z') nc += 32;
-                                        if (hc != nc) break;
-                                    }
-                                    if (j == n_len) return true;
-                                }
-                                return false;
-                                };
-
-                            if (str_contains(man, "Acer") && str_contains(mod, "Aspire")) {
+                            if (util::string::find_ci(man, "Acer") && util::string::find_ci(mod, "Aspire")) {
                                 is_acer_aspire = true;
                             }
                         }
@@ -9369,14 +9503,14 @@ public:
     {
     #if (x86_64)       
         #if (WINDOWS)
-            const HMODULE ntdll = memory::get_ntdll();
+            const HMODULE ntdll = memory::get_module(true);
             if (!ntdll) {
                 return false;
             }
 
             const char* function_names[] = { "NtQuerySystemInformation" };
             void* functions[ARRAYSIZE(function_names)] = {};
-            memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+            memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
             using nt_query_sysinfo_fn = NTSTATUS(__stdcall*)(ULONG, PVOID, ULONG, PULONG); /* int is SYSTEM_INFORMATION_CLASS */
             nt_query_sysinfo_fn nt_query_system_information = reinterpret_cast<nt_query_sysinfo_fn>(functions[0]);
@@ -9483,8 +9617,8 @@ public:
                 return false;
             }
 
-            if ((str[0] & 0xDF) != 'Q') return false;
-            if ((str[1] & 0xDF) != 'M') return false;
+            if (util::string::to_upper(str[0]) != 'Q') return false;
+            if (util::string::to_upper(str[1]) != 'M') return false;
 
             return str[2] == '0' && str[3] == '0' && str[4] == '0' && str[5] == '0';
         };
@@ -9545,7 +9679,7 @@ public:
         constexpr size_t MAX_DESCRIPTOR_SIZE = 64 * 1024;
         u8 successful_opens = 0;
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return result;
 
         constexpr const char* function_names[] = {
@@ -9558,7 +9692,7 @@ public:
             "NtClose"
         };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using ntopenfile_fn = NTSTATUS(__stdcall*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG);
         using nt_device_io_control_file_fn = NTSTATUS(__stdcall*)(HANDLE, HANDLE, PVOID, PVOID, PIO_STATUS_BLOCK, ULONG, PVOID, ULONG, PVOID, ULONG);
@@ -10263,7 +10397,7 @@ public:
      * @implements VM::WINE
      */
     [[nodiscard]] static bool wine() {
-        const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        const HMODULE kernel32 = memory::get_module(false);
         if (!kernel32) {
             return false;
         }
@@ -10312,11 +10446,11 @@ public:
      * @implements VM::POWER_CAPABILITIES
      */
     [[nodiscard]] static bool power_capabilities() {
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
 
         constexpr const char* function_names[] = { "NtPowerInformation" }; /* Win8 // Windows Server 2012 */
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
         if (!functions[0]) return false;
 
         using nt_power_information_fn = NTSTATUS(__stdcall*)(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
@@ -10410,12 +10544,12 @@ public:
      * @implements VM::GAMARUE
      */
     [[nodiscard]] static bool gamarue() {
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "NtOpenKey", "NtQueryValueKey", "RtlInitUnicodeString", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         const auto nt_open_key = reinterpret_cast<NTSTATUS(__stdcall*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES)>(functions[0]);
         const auto nt_query_value_key = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE, PUNICODE_STRING, ULONG, PVOID, ULONG, PULONG)>(functions[1]);
@@ -10631,12 +10765,12 @@ public:
      * @implements VM::MUTEX
      */
     [[nodiscard]] static bool mutex() {
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "NtOpenMutant", "RtlInitUnicodeString", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using rtl_init_unicode_string_fn = void(__stdcall*)(PUNICODE_STRING DestinationString, PCWSTR SourceString);
         using ntclose_fn = NTSTATUS(__stdcall*)(HANDLE Handle);
@@ -10717,12 +10851,12 @@ public:
      * @implements VM::CUCKOO
      */
     [[nodiscard]] static bool cuckoo() {
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "NtOpenFile", "RtlInitUnicodeString", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using nt_openfile_t = 
             NTSTATUS(__stdcall*)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
@@ -10866,7 +11000,7 @@ public:
         } KEY_INFORMATION_CLASS;
 
         constexpr ULONG system_module_information = 11;
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = {
@@ -10879,7 +11013,7 @@ public:
             "NtClose"
         };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using nt_query_system_information_fn = NTSTATUS(__stdcall*)(ULONG SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength);
         using nt_allocate_virtual_memory_fn = NTSTATUS(__stdcall*)(
@@ -11060,12 +11194,12 @@ public:
      * @implements VM::HANDLES
      */
     [[nodiscard]] static bool device_handles() {
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "RtlInitUnicodeString", "NtOpenFile", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         const auto rtl_init_unicode_string = reinterpret_cast<void(__stdcall*)(PUNICODE_STRING, PCWSTR)>(functions[0]);
         const auto nt_open_file = reinterpret_cast<NTSTATUS(__stdcall*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, ULONG, ULONG)>(functions[1]);
@@ -11215,12 +11349,12 @@ public:
             UNICODE_STRING Name;
         };
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
     
         constexpr const char* function_names[] = { "NtOpenKey", "NtQueryObject", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
     
         using POBJECT_NAME_INFORMATION = OBJECT_NAME_INFORMATION*;
         using nt_open_key_fn = NTSTATUS(__stdcall*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
@@ -11323,12 +11457,12 @@ public:
             MaxKeyInfoClass
         };
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "RtlInitUnicodeString", "NtOpenKey", "NtQueryKey", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         const auto rtl_init_unicode_string = reinterpret_cast<void(__stdcall*)(PUNICODE_STRING, PCWSTR)>(functions[0]);
         const auto nt_open_key = reinterpret_cast<NTSTATUS(__stdcall*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES)>(functions[1]);
@@ -11549,7 +11683,7 @@ public:
             }
         }
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = {
@@ -11557,7 +11691,7 @@ public:
             "NtSetContextThread"
         };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using nt_get_context_thread_fn = NTSTATUS(__stdcall*)(HANDLE, PCONTEXT);
         using nt_set_context_thread_fn = NTSTATUS(__stdcall*)(HANDLE, PCONTEXT);
@@ -11820,6 +11954,7 @@ public:
     #endif
     }
 
+
     /**
      * @brief Check if Dark Byte's VM is present
      * @category Windows
@@ -11847,12 +11982,12 @@ public:
         const bool is_amd = cpu::is_amd();
 
         const HANDLE current_thread = reinterpret_cast<HANDLE>(-2LL);
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "NtGetContextThread", "NtSetContextThread" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         const auto nt_get_context_thread = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE, PCONTEXT)>(functions[0]);
         const auto nt_set_context_thread = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE, PCONTEXT)>(functions[1]);
@@ -11880,14 +12015,19 @@ public:
             return (((vmcall_result >> 24) & 0xFF) == 0xCE); /* the VM returns status in bits 24–31; Cheat Engine uses 0xCE here */
         };
 
+        /*
+         * Pure ICEBP RIP Advancement Check (Clean DR State)
+         * Verifies if the hypervisor correctly increments guest RIP when emulating ICEBP
+         */
         auto try_icebp = [&]() noexcept -> bool {
-            bool detected = false;
             CONTEXT ctx = {};
             ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
 
-            if (!NT_SUCCESS(nt_get_context_thread(current_thread, &ctx))) return false;
+            if (!NT_SUCCESS(nt_get_context_thread(current_thread, &ctx))) {
+                return false;
+            }
 
-            /* Save old stuff */
+            /* Save old debug register configuration */
             const auto old_dr0 = ctx.Dr0;
             const auto old_dr1 = ctx.Dr1;
             const auto old_dr2 = ctx.Dr2;
@@ -11895,40 +12035,63 @@ public:
             const auto old_dr6 = ctx.Dr6;
             const auto old_dr7 = ctx.Dr7;
 
-            ctx.Dr0 = reinterpret_cast<u64>(dbvm_icebp_stub);
-            ctx.Dr1 = reinterpret_cast<u64>(dbvm_icebp_stub);
-            ctx.Dr2 = reinterpret_cast<u64>(dbvm_icebp_stub);
-            ctx.Dr3 = reinterpret_cast<u64>(dbvm_icebp_stub);
-            ctx.Dr7 = 0x55; /* local exact execute breakpoints for Dr0-Dr3 */
+            /* Clean all debug registers to ensure we test pure trap-class behavior */
+            ctx.Dr0 = 0;
+            ctx.Dr1 = 0;
+            ctx.Dr2 = 0;
+            ctx.Dr3 = 0;
+            ctx.Dr6 = 0;
+            ctx.Dr7 = 0;
 
-            if (!NT_SUCCESS(nt_set_context_thread(current_thread, &ctx))) return false;
+            if (!NT_SUCCESS(nt_set_context_thread(current_thread, &ctx))) {
+                return false;
+            }
+
+            bool rip_failed = false;
+            bool step_triggered = false;
+            const u64 stub_base = reinterpret_cast<u64>(dbvm_icebp_stub);
+
+            /* Local helper struct to evaluate exception parameters across compilers */
+            struct icebp_handler {
+                static LONG execute(
+                    const EXCEPTION_POINTERS* ep,
+                    DWORD exception_code,
+                    bool* rip_failed,
+                    bool* step_triggered,
+                    u64 stub_base_addr
+                ) {
+                    if (exception_code == EXCEPTION_SINGLE_STEP && ep && ep->ContextRecord) {
+                        *step_triggered = true;
+                        const u64 exception_rip = ep->ContextRecord->Rip;
+
+                        /*
+                         * Under DBVM, the exception context contains a RIP pointing directly
+                         * to the ICEBP instruction (stub_base_addr) instead of (stub_base_addr + 1)
+                         */
+                        if (exception_rip == stub_base_addr) {
+                            *rip_failed = true;
+                            /* Manually advance RIP past ICEBP (0xF1) to RET (0xC3) to avoid an infinite loop */
+                            ep->ContextRecord->Rip = stub_base_addr + 1;
+                        }
+                    }
+                    return EXCEPTION_EXECUTE_HANDLER;
+                }
+            };
 
             __try {
                 memory::execute(dbvm_icebp_stub);
-
-                /*
-                 * If the code makes it here without aborting to the __except block,
-                 * the exception was silently swallowed by the hypervisor.
-                 */
-                detected = true;
-                debug("DBVM: INT 1 exception was not correctly handled");
             }
-            __except (GetExceptionCode() == EXCEPTION_SINGLE_STEP ?
-                (
-                    /* Check if they mess up Dr6 and Dr7 */
-                    detected = ((GetExceptionInformation()->ContextRecord->Dr7 & 0xFF) != 0x55 || GetExceptionInformation()->ContextRecord->Dr6 == 0),
-                    EXCEPTION_EXECUTE_HANDLER
-                ) : EXCEPTION_EXECUTE_HANDLER) {
-                if (_exception_code() != EXCEPTION_SINGLE_STEP) {
-                    detected = true;
-                    debug("DBVM: ICEBP exception didn't trigger #DB");
-                }
-                else if (detected) {
-                    debug("DBVM: hardware debug registers were not correctly restored");
-                }
+            __except (icebp_handler::execute(
+                GetExceptionInformation(),
+                GetExceptionCode(),
+                &rip_failed,
+                &step_triggered,
+                stub_base
+            )) {
+                /* Handled */
             }
 
-            /* Restore old stuff */
+            /* Restore original debug registers */
             ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
             ctx.Dr0 = old_dr0;
             ctx.Dr1 = old_dr1;
@@ -11938,16 +12101,27 @@ public:
             ctx.Dr7 = old_dr7;
             nt_set_context_thread(current_thread, &ctx);
 
-            return detected;
+            if (!step_triggered) {
+                debug("DBVM: ICEBP exception didn't trigger #DB");
+                return true; /* Hypervisor swallowed the trap entirely, but should not happen */
+            }
+
+            if (rip_failed) {
+                debug("DBVM: ICEBP failed to advance guest RIP");
+                return true;
+            }
+
+            return false;
         };
 
-        const bool found_vmcall = try_keys();
+        const bool found_keys = try_keys();
         const bool found_icebp = try_icebp();
 
-        if (found_vmcall) return core::add(brand_enum::DBVM);
-        if (found_icebp)  return true;
+        if (found_keys) {
+            return core::add(brand_enum::DBVM);
+        }
 
-        return false;
+        return found_icebp;
     #endif
     }
 
@@ -11971,12 +12145,12 @@ public:
         UNICODE_STRING dir_name{};
         NTSTATUS status;
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "NtOpenDirectoryObject", "NtQueryDirectoryObject", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         const auto nt_open_directory_object = reinterpret_cast<NTSTATUS(__stdcall*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES)>(functions[0]);
         const auto nt_query_directory_object = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE, PVOID, ULONG, BOOLEAN, BOOLEAN, PULONG, PULONG)>(functions[1]);
@@ -12304,12 +12478,12 @@ public:
 
             privilege_state_saved = true;
 
-            const HMODULE ntdll = memory::get_ntdll();
+            const HMODULE ntdll = memory::get_module(true);
             if (!ntdll) break;
 
             constexpr const char* function_names[] = { "NtEnumerateSystemEnvironmentValuesEx", "NtAllocateVirtualMemory", "NtFreeVirtualMemory", "NtQuerySystemEnvironmentValueEx" };
             void* functions[ARRAYSIZE(function_names)] = {};
-            memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+            memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
             nt_enumerate_values = reinterpret_cast<nt_enumerate_system_environment_values_ex_fn>(functions[0]);
             nt_allocate_memory = reinterpret_cast<nt_allocate_virtual_memory_fn>(functions[1]);
@@ -12818,12 +12992,12 @@ public:
         /* One cache line = 64 bytes */
         const SIZE_T target_size = 64;
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = { "NtAllocateVirtualMemory", "NtProtectVirtualMemory", "NtFlushInstructionCache", "NtFreeVirtualMemory" };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using nt_allocate_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
         using nt_protect_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
@@ -13282,7 +13456,7 @@ public:
         constexpr u32 random_msr = 0xDEADBEEFu;
 
     #if (GCC || CLANG) 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = {
@@ -13290,7 +13464,7 @@ public:
             "RtlRemoveVectoredExceptionHandler"
         };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using rtl_add_vectored_exception_handler_fn = PVOID(__stdcall*)(ULONG, PVECTORED_EXCEPTION_HANDLER);
         using rtl_remove_vectored_exception_handler_fn = ULONG(__stdcall*)(PVOID);
@@ -13465,7 +13639,7 @@ public:
         if (util::is_x86_process_on_arm()) {
             return false;
         }
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = {
@@ -13484,7 +13658,7 @@ public:
             "NtFlushInstructionCache"
         };
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using nt_allocate_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
         using nt_free_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, PSIZE_T, ULONG);
@@ -13518,7 +13692,7 @@ public:
         if (!nt_allocate_virtual_memory || !nt_free_virtual_memory || !nt_get_context_thread ||
             !nt_set_context_thread || !rtl_add_vectored_exception_handler || !rtl_remove_vectored_exception_handler ||
             !nt_protect_virtual_memory || !nt_query_system_information || !nt_create_thread_ex ||
-            !nt_wait_for_single_object || !nt_close || !nt_set_information_thread || 
+            !nt_wait_for_single_object || !nt_close || !nt_set_information_thread ||
             !nt_flush_instruction_cache) {
             return false;
         }
@@ -13621,32 +13795,6 @@ public:
             hook_detected = true;
         }
         else {
-            /* Now try on all cores, total hardware processors */
-            struct SYSTEM_BASIC_INFORMATION_LOCAL {
-                ULONG Reserved;
-                ULONG TimerResolution;
-                ULONG PageSize;
-                ULONG NumberOfPhysicalPages;
-                ULONG LowestPhysicalPageNumber;
-                ULONG HighestPhysicalPageNumber;
-                ULONG AllocationGranularity;
-                ULONG_PTR MinimumUserModeAddress;
-                ULONG_PTR MaximumUserModeAddress;
-                ULONG_PTR ActiveProcessorsAffinityMask;
-                CCHAR NumberOfProcessors;
-            };
-
-            SYSTEM_BASIC_INFORMATION_LOCAL sys_info{};
-            ULONG ret_len = 0;
-            ULONG num_processors = 1;
-
-            /* 0 = SystemBasicInformation */
-            status = nt_query_system_information(0, &sys_info, sizeof(sys_info), &ret_len);
-            if (status < 0) {
-                return false;
-            }
-            num_processors = sys_info.NumberOfProcessors;
-
             volatile LONG did_anyone_throw = 0;
 
             GROUP_AFFINITY active_group_aff{};
@@ -13654,7 +13802,7 @@ public:
                 for (ULONG i = 0; i < 64; ++i) {
                     if (active_group_aff.Mask & ((ULONG_PTR)1 << i)) {
                         GROUP_AFFINITY target_aff = active_group_aff;
-                        target_aff.Mask = (ULONG_PTR)1 << i; 
+                        target_aff.Mask = (ULONG_PTR)1 << i;
 
                         if (SetThreadGroupAffinity(current_thread, &target_aff, nullptr)) {
                             __try {
@@ -13667,6 +13815,10 @@ public:
                     }
                 }
                 SetThreadGroupAffinity(current_thread, &original_affinity, nullptr);
+            }
+
+            if (did_anyone_throw != 0) {
+                hook_detected = true;
             }
         }
 
@@ -13877,7 +14029,7 @@ public:
         static bool hypervisor_detected = true;
         static u64 g_saved_rsp = 0;
 
-        const HMODULE ntdll = memory::get_ntdll();
+        const HMODULE ntdll = memory::get_module(true);
         if (!ntdll) return false;
 
         constexpr const char* function_names[] = {
@@ -13888,7 +14040,7 @@ public:
         };
 
         void* functions[ARRAYSIZE(function_names)] = {};
-        memory::get_function_address(ntdll, function_names, functions, ARRAYSIZE(function_names));
+        memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
 
         using nt_allocate_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
         using nt_free_virtual_memory_fn = NTSTATUS(__stdcall*)(HANDLE, PVOID*, PSIZE_T, ULONG);
@@ -14272,7 +14424,7 @@ public:
         };
         void* functions[ARRAYSIZE(function_names)] = {};
 
-        memory::get_function_address(tbs, function_names, functions, ARRAYSIZE(function_names), false);
+        memory::get_function(tbs, function_names, functions, ARRAYSIZE(function_names), false);
 
         tbsi_get_tcg_log_ex_fn tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_fn>(functions[0]);
         tbsi_context_create_fn tbsi_context_create = reinterpret_cast<tbsi_context_create_fn>(functions[1]);
@@ -14517,7 +14669,7 @@ public:
             "BCryptCloseAlgorithmProvider"
         };
         void* bcrypt_funcs[7] = { nullptr };
-        memory::get_function_address(bcrypt_dll, bcrypt_names, bcrypt_funcs, 7, false);
+        memory::get_function(bcrypt_dll, bcrypt_names, bcrypt_funcs, 7, false);
 
         p_bcrypt_open_algorithm_provider = reinterpret_cast<bcrypt_open_algorithm_provider_t>(bcrypt_funcs[0]);
         p_bcrypt_get_property = reinterpret_cast<bcrypt_get_property_t>(bcrypt_funcs[1]);
@@ -14565,7 +14717,7 @@ public:
             "Tbsip_Context_Close"
         };
         void* tbs_funcs[4] = { nullptr };
-        memory::get_function_address(tbs_dll, tbs_names, tbs_funcs, 4, false);
+        memory::get_function(tbs_dll, tbs_names, tbs_funcs, 4, false);
 
         p_tbsi_context_create = reinterpret_cast<tbsi_context_create_t>(tbs_funcs[0]);
         p_tbsi_get_tcg_log_ex = reinterpret_cast<tbsi_get_tcg_log_ex_t>(tbs_funcs[1]);
@@ -16370,7 +16522,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
         #endif
 
         {VM::TIMER, {100, VM::timer}},
-        {VM::THREAD_MISMATCH, {50, VM::thread_mismatch}},
+        {VM::THREAD_MISMATCH, {45, VM::thread_mismatch}},
         {VM::VMID, {100, VM::vmid}},
         {VM::CPU_BRAND, {95, VM::cpu_brand}},
         {VM::CPUID_SIGNATURE, {95, VM::cpuid_signature}},
