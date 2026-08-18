@@ -3357,7 +3357,6 @@ public:
             }
         };
 
-    #if (WINDOWS)
         struct bios_info {
             static char manufacturer[256];
             static char model[128];
@@ -3406,6 +3405,7 @@ public:
             }
         };
 
+    #if (WINDOWS)
         struct module {
             static HMODULE& fetch_ntdll() noexcept {
                 static HMODULE handle = nullptr;
@@ -4200,17 +4200,17 @@ public:
     struct util {
         struct string {
             /* Converts a single character to lowercase */
-            static VMAWARE_FORCE_INLINE char to_lower(char c) noexcept {
+            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR char to_lower(char c) noexcept {
                 return (c >= 'A' && c <= 'Z') ? static_cast<char>(c | 0x20) : c;
             }
 
             /* Converts a single character to uppercase */
-            static VMAWARE_FORCE_INLINE char to_upper(char c) noexcept {
+            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR char to_upper(char c) noexcept {
                 return (c >= 'a' && c <= 'z') ? static_cast<char>(c & 0xDF) : c;
             }
 
             /* Checks if a string starts with a specific prefix (case-sensitive) */
-            static VMAWARE_FORCE_INLINE bool starts_with(const char* str, const char* prefix) noexcept {
+            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool starts_with(const char* str, const char* prefix) noexcept {
                 if (!str || !prefix) return false;
                 while (*prefix) {
                     if (*str++ != *prefix++) return false;
@@ -4219,7 +4219,7 @@ public:
             }
 
             /* Checks if a string starts with a specific prefix (case-insensitive) */
-            static VMAWARE_FORCE_INLINE bool starts_with_ci(const char* str, const char* prefix) noexcept {
+            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool starts_with_ci(const char* str, const char* prefix) noexcept {
                 if (!str || !prefix) return false;
                 while (*prefix) {
                     if (to_lower(*str++) != to_lower(*prefix++)) return false;
@@ -4228,7 +4228,7 @@ public:
             }
 
             /* Finds a substring inside a null-terminated string (case-sensitive) */
-            static const char* find(const char* haystack, const char* needle) noexcept {
+            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR const char* find(const char* haystack, const char* needle) noexcept {
                 if (!haystack || !needle) return nullptr;
                 if (!*needle) return haystack;
                 for (; *haystack; ++haystack) {
@@ -4275,7 +4275,7 @@ public:
             }
 
             /* Compares two null-terminated strings for equality (case-insensitive) */
-            static bool equals_ci(const char* s1, const char* s2) noexcept {
+            static VMAWARE_FORCE_INLINE bool equals_ci(const char* s1, const char* s2) noexcept {
                 if (!s1 || !s2) return s1 == s2;
                 while (*s1 && *s2) {
                     if (to_lower(*s1) != to_lower(*s2)) return false;
@@ -4294,7 +4294,7 @@ public:
             }
 
             /* Trims leading and trailing whitespaces from a std::string in place */
-            static void trim_inplace(std::string& s) noexcept {
+            static VMAWARE_FORCE_INLINE void trim_inplace(std::string& s) noexcept {
                 while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
                     s.erase(s.begin());
                 }
@@ -4304,7 +4304,7 @@ public:
             }
 
             /* Trims leading whitespaces from a null-terminated string pointer */
-            static const char* ltrim(const char* str) noexcept {
+            static VMAWARE_FORCE_INLINE const char* ltrim(const char* str) noexcept {
                 if (!str) return nullptr;
                 while (*str && std::isspace(static_cast<unsigned char>(*str))) {
                     str++;
@@ -4313,7 +4313,7 @@ public:
             }
 
             /* Checks if a std::string consists only of numerical digits */
-            static bool is_numeric(const std::string& s) noexcept {
+            static VMAWARE_FORCE_INLINE bool is_numeric(const std::string& s) noexcept {
                 if (s.empty()) return false;
                 const size_t len = s.length();
                 for (size_t i = 0; i < len; ++i) {
@@ -4639,27 +4639,27 @@ public:
         #if (LINUX)
             VMAWARE_ASSUME(executable != nullptr);
             #if (VMA_CPP >= 17)
-                for (const auto& entry : std::filesystem::directory_iterator("/proc")) {
-                    if (!entry.is_directory()) {
-                        continue;
-                    }
-
-                    const std::string filename = entry.path().filename().string();
-            #else
-                std::unique_ptr<DIR, decltype(&closedir)> dir(opendir("/proc"), closedir);
-                if (!dir) {
-                    debug("util::is_proc_running: ", "failed to open /proc directory");
-                    return false;
+            for (const auto& entry : std::filesystem::directory_iterator("/proc")) {
+                if (!entry.is_directory()) {
+                    continue;
                 }
 
-                struct dirent* entry;
-                while ((entry = readdir(dir.get())) != nullptr) {
-                    std::string filename(entry->d_name);
-                    if (filename == "." || filename == "..") {
-                        continue;
-                    }
+                const std::string filename = entry.path().filename().string();
+            #else
+            std::unique_ptr<DIR, decltype(&closedir)> dir(opendir("/proc"), closedir);
+            if (!dir) {
+                debug("util::is_proc_running: ", "failed to open /proc directory");
+                return false;
+            }
+
+            struct dirent* entry;
+            while ((entry = readdir(dir.get())) != nullptr) {
+                std::string filename(entry->d_name);
+                if (filename == "." || filename == "..") {
+                    continue;
+                }
             #endif
-                if (!util::string::is_numeric(filename)) 
+                if (!util::string::is_numeric(filename)) {
                     continue;
                 }
 
@@ -6139,14 +6139,12 @@ public:
 
         #else
 
-            util::string::trim_inplace(s);
-
             {
                 std::ifstream f("/sys/devices/system/cpu/smt/control");
                 if (f) {
                     std::string s;
                     if (std::getline(f, s)) {
-                        trim(s);
+                        util::string::trim_inplace(s);
 
                         if (s == "on") {
                             return true;
@@ -6164,7 +6162,7 @@ public:
                 if (f) {
                     std::string s;
                     if (std::getline(f, s)) {
-                        trim(s);
+                        util::string::trim_inplace(s);
 
                         if (s == "1") {
                             return true;
@@ -6182,7 +6180,7 @@ public:
                 if (f) {
                     std::string s;
                     if (std::getline(f, s)) {
-                        trim(s);
+                        util::string::trim_inplace(s);
 
                         for (char ch : s) {
                             if (ch == ',' || ch == '-') {
@@ -6213,8 +6211,8 @@ public:
                         std::string key = line.substr(0, pos);
                         std::string val = line.substr(pos + 1);
 
-                        trim(key);
-                        trim(val);
+                        util::string::trim_inplace(key);
+                        util::string::trim_inplace(val);
 
                         if (key == "siblings") {
                             try { siblings = std::stoi(val); }
@@ -7913,14 +7911,15 @@ public:
             util::string::to_lower_inplace(content);
 
             for (const auto& vm_string : vm_table) {
-                if (util::string::contains(content, vm_string.first))
+                if (util::string::contains(content, vm_string.first)) {
                     debug("DMI_SCAN: content = ", content);
 
                     if (vm_string.second == brand_enum::AWS_NITRO) {
                         if (smbios_vm_bit()) {
                             return core::add(brand_enum::AWS_NITRO);
                         }
-                    } else {
+                    }
+                    else {
                         return core::add(vm_string.second);
                     }
                 }
@@ -9998,12 +9997,11 @@ public:
                 continue;
             }
 
-            if (!strncmp(name, "nvme", 4) ||
-                !strncmp(name, "sd", 2) ||
-                !strncmp(name, "sg", 2) ||
-                !strncmp(name, "hd", 2) ||
-                !strncmp(name, "vd", 2)
-               ) {
+            if (util::string::starts_with(name, "nvme") ||
+                util::string::starts_with(name, "sd") ||
+                util::string::starts_with(name, "sg") ||
+                util::string::starts_with(name, "hd") ||
+                util::string::starts_with(name, "vd")) {
                 const char sys_block_str[] = "/sys/block/";
                 const char device_serial_str[] = "/device/serial";
 
@@ -10128,11 +10126,9 @@ public:
 
         debug("MAC_MEMSIZE: ", "ram size = ", ram);
 
-        for (const char c : ram) {
-            if (!std::isdigit(c)) {
-                debug("MAC_MEMSIZE: ", "found non-digit character, returned false");
-                return false;
-            }
+        if (!util::string::is_numeric(ram)) {
+            debug("MAC_MEMSIZE: ", "found non-digit character, returned false");
+            return false;
         }
 
         const u64 ram_u64 = std::stoull(ram);
@@ -10338,9 +10334,7 @@ public:
         if (std::unique_ptr<std::string> profiler_res_ptr = util::sys_result("system_profiler SPHardwareDataType")) {
             std::string& output = *profiler_res_ptr;
 
-            std::transform(output.begin(), output.end(), output.begin(),[](u8 c) {
-                return std::tolower(c); 
-            });
+            util::string::to_lower_inplace(output);
 
             if (util::find(output, keyword)) {
                 return true;
@@ -14826,15 +14820,6 @@ public:
         }
 
         /* Analyze TPM algorithms */
-        auto trim = [](std::string s) {
-            auto ws = [](unsigned char c) { 
-                return std::isspace(c) != 0;
-            };
-            s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), ws));
-            s.erase(std::find_if_not(s.rbegin(), s.rend(), ws).base(), s.end());
-            return s;
-        };
-
         struct alg_name_id {
             const char* name;
             u16 id;
@@ -14886,7 +14871,7 @@ public:
         std::string t;
 
         while (std::getline(ss, t, ',')) {
-            t = trim(t);
+            util::string::trim_inplace(t);
             if (t.empty() || t.find('=') != std::string::npos) {
                 continue;
             }
