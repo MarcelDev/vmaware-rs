@@ -327,6 +327,12 @@
     #define VMAWARE_CONSTEXPR
 #endif
 
+#if (VMA_CPP >= 20)
+    #define VMAWARE_CONSTEXPR_20 constexpr
+#else
+    #define VMAWARE_CONSTEXPR_20
+#endif
+
 #if (MSVC)
     #define VMAWARE_FORCE_INLINE __forceinline
 #elif (CLANG || GCC)
@@ -1166,7 +1172,7 @@ public:
              *
              * left-trim only to handle stupid whitespaces before the brand string in ARM CPUs (Virtual CPUs)
              */
-            const char* start_ptr = util::string::ltrim(buffer);
+            const char* start_ptr = string::ltrim(buffer);
 
             memo::cpu_brand::store(start_ptr);
             debug("CPU: ", start_ptr);
@@ -1277,7 +1283,7 @@ public:
 
             if (cpu::is_intel()) {
                 /* Ultra */
-                if (util::string::find(brand, "Ultra") &&
+                if (string::find(brand, "Ultra") &&
                     strpbrk(brand, "0123456789")) {
                     result.found = true;
                     result.string = brand;
@@ -1305,7 +1311,7 @@ public:
                 }
             }
             else if (cpu::is_amd()) {
-                if (util::string::find(brand, "AMD Ryzen")) {
+                if (string::find(brand, "AMD Ryzen")) {
                     result.found = true;
                     result.is_ryzen = true;
                     result.string = brand;
@@ -3463,7 +3469,9 @@ public:
                 constexpr char s[] = __DATE__ " " __TIME__ " " __FILE__ " " VMAWARE_STR(__LINE__);
                 u32 h = 2166136261u;
                 for (char c : s) {
-                    if (!c) break;
+                    if (!c) {
+                        break;
+                    }
                     h ^= static_cast<unsigned char>(c);
                     h *= 16777619u;
                 }
@@ -3866,9 +3874,13 @@ public:
             }
 
             [[nodiscard]] static timer_tick_t calculate_latency(const std::vector<timer_tick_t>& samples_in) {
-                if (samples_in.empty()) return 0;
+                if (samples_in.empty()) {
+                    return 0;
+                }
                 const size_t N = samples_in.size();
-                if (N == 1) return samples_in[0];
+                if (N == 1) {
+                    return samples_in[0];
+                }
 
                 /* Create a local copy to sort */
                 std::vector<timer_tick_t> s = samples_in;
@@ -3886,7 +3898,9 @@ public:
                 }
 
                 /* Fallback to the median if the dataset is too small */
-                if (count == 0) return s[N / 2];
+                if (count == 0) {
+                    return s[N / 2];
+                }
 
                 /* Compute the average of the middle 50% and round to the nearest integer */
                 return static_cast<timer_tick_t>((sum / count) + 0.5);
@@ -3957,7 +3971,9 @@ public:
             static std::unordered_map<HMODULE, func_map> function_cache;
 
             for (size_t i = 0; i < count; ++i) functions[i] = nullptr;
-            if (!module) return;
+            if (!module) {
+                return;
+            }
 
             BYTE* base = reinterpret_cast<BYTE*>(module);
 
@@ -3977,7 +3993,9 @@ public:
             };
 
             auto cstr_from_rva = [&](DWORD rva) noexcept -> const char* {
-                if (!valid_range(static_cast<size_t>(rva), 1)) return nullptr;
+                if (!valid_range(static_cast<size_t>(rva), 1)) {
+                    return nullptr;
+                }
 
                 const char* start = reinterpret_cast<const char*>(base + rva);
                 const size_t remaining = module_size - static_cast<size_t>(rva);
@@ -3990,16 +4008,26 @@ public:
             };
 
             /* Validate DOS header */
-            if (VMAWARE_UNLIKELY(!valid_range(0, sizeof(IMAGE_DOS_HEADER)))) return;
+            if (VMAWARE_UNLIKELY(!valid_range(0, sizeof(IMAGE_DOS_HEADER)))) {
+                return;
+            }
             const auto* dosHeader = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-            if (VMAWARE_UNLIKELY(dosHeader->e_magic != IMAGE_DOS_SIGNATURE)) return;
+            if (VMAWARE_UNLIKELY(dosHeader->e_magic != IMAGE_DOS_SIGNATURE)) {
+                return;
+            }
 
-            /* E_lfanew -> NT headers */
-            if (VMAWARE_UNLIKELY(dosHeader->e_lfanew < 0)) return;
+            /* e_lfanew -> NT headers */
+            if (VMAWARE_UNLIKELY(dosHeader->e_lfanew < 0)) {
+                return;
+            }
             const size_t e_lfanew = static_cast<size_t>(dosHeader->e_lfanew);
-            if (VMAWARE_UNLIKELY(!valid_range(e_lfanew, sizeof(IMAGE_NT_HEADERS)))) return;
+            if (VMAWARE_UNLIKELY(!valid_range(e_lfanew, sizeof(IMAGE_NT_HEADERS)))) {
+                return;
+            }
             const auto* ntHeaders = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + e_lfanew);
-            if (VMAWARE_UNLIKELY(ntHeaders->Signature != IMAGE_NT_SIGNATURE)) return;
+            if (VMAWARE_UNLIKELY(ntHeaders->Signature != IMAGE_NT_SIGNATURE)) {
+                return;
+            }
 
             const size_t sizeOfImage = static_cast<size_t>(ntHeaders->OptionalHeader.SizeOfImage);
             if (sizeOfImage != 0 && sizeOfImage > module_size) {
@@ -4027,16 +4055,26 @@ public:
             const DWORD funcCount = exportDir->NumberOfFunctions;
 
             constexpr DWORD MAX_NAMES = 1u << 20;
-            if (nameCount == 0 || nameCount > MAX_NAMES) return;
-            if (funcCount == 0 || funcCount > MAX_NAMES) return;
+            if (nameCount == 0 || nameCount > MAX_NAMES) {
+                return;
+            }
+            if (funcCount == 0 || funcCount > MAX_NAMES) {
+                return;
+            }
 
             const DWORD addr_names = exportDir->AddressOfNames;
             const DWORD addr_funcs = exportDir->AddressOfFunctions;
             const DWORD addr_ord = exportDir->AddressOfNameOrdinals;
 
-            if (!valid_range(static_cast<size_t>(addr_names), static_cast<size_t>(nameCount) * sizeof(DWORD))) return;
-            if (!valid_range(static_cast<size_t>(addr_funcs), static_cast<size_t>(funcCount) * sizeof(DWORD))) return;
-            if (!valid_range(static_cast<size_t>(addr_ord), static_cast<size_t>(nameCount) * sizeof(WORD))) return;
+            if (!valid_range(static_cast<size_t>(addr_names), static_cast<size_t>(nameCount) * sizeof(DWORD))) {
+                return;
+            }
+            if (!valid_range(static_cast<size_t>(addr_funcs), static_cast<size_t>(funcCount) * sizeof(DWORD))) {
+                return;
+            }
+            if (!valid_range(static_cast<size_t>(addr_ord), static_cast<size_t>(nameCount) * sizeof(WORD))) {
+                return;
+            }
 
             const DWORD* nameRvas = reinterpret_cast<const DWORD*>(base + addr_names);
             const DWORD* funcRvas = reinterpret_cast<const DWORD*>(base + addr_funcs);
@@ -4044,7 +4082,9 @@ public:
 
             for (size_t i = 0; i < count; ++i) {
                 const char* current_name = names[i];
-                if (!current_name) continue;
+                if (!current_name) {
+                    continue;
+                }
                 const std::string s_name(current_name);
 
                 /* Only query and populate the cache if it's not a dynamically loaded module with LoadLibraryEx */
@@ -4081,9 +4121,13 @@ public:
                     const char* candidateName = cstr_from_rva(nameRvas[lo]);
                     if (candidateName && strcmp(current_name, candidateName) == 0) {
                         const WORD nameOrdinal = ordinals[lo];
-                        if (static_cast<DWORD>(nameOrdinal) >= funcCount) continue;
+                        if (static_cast<DWORD>(nameOrdinal) >= funcCount) {
+                            continue;
+                        }
                         const DWORD funcRva = funcRvas[nameOrdinal];
-                        if (!valid_range(static_cast<size_t>(funcRva), 1)) continue;
+                        if (!valid_range(static_cast<size_t>(funcRva), 1)) {
+                            continue;
+                        }
                         void* addr = reinterpret_cast<void*>(base + funcRva);
                         functions[i] = addr;
 
@@ -4196,135 +4240,190 @@ public:
     };
 #endif
 
+    /* String utilities */
+    struct string {
+        /* Converts a single character to lowercase */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR char to_lower(char c) noexcept {
+            return (c >= 'A' && c <= 'Z') ? static_cast<char>(c | 0x20) : c;
+        }
+
+        /* Converts a single character to uppercase */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR char to_upper(char c) noexcept {
+            return (c >= 'a' && c <= 'z') ? static_cast<char>(c & 0xDF) : c;
+        }
+
+        /* Checks if a string starts with a specific prefix (case-sensitive) */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR_20 bool starts_with(const char* str, const char* prefix) noexcept {
+            if (!str || !prefix) {
+                return false;
+            }
+            while (*prefix) {
+                if (*str++ != *prefix++) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /* Finds a substring inside a null-terminated string (case-sensitive) */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR_20 const char* find(const char* haystack, const char* needle) noexcept {
+            if (!haystack || !needle) {
+                return nullptr;
+            }
+            if (!*needle) {
+                return haystack;
+            }
+            for (; *haystack; ++haystack) {
+                if (*haystack == *needle) {
+                    const char* h = haystack;
+                    const char* n = needle;
+                    while (*h && *n && *h == *n) {
+                        h++;
+                        n++;
+                    }
+                    if (!*n) {
+                        return haystack;
+                    }
+                }
+            }
+            return nullptr;
+        }
+
+        /* Finds a substring inside a null-terminated string (case-insensitive) */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR_20 const char* find_ci(const char* haystack, const char* needle) noexcept {
+            if (!haystack || !needle) {
+                return nullptr;
+            }
+            if (!*needle) {
+                return haystack;
+            }
+            const char n0_lower = to_lower(*needle);
+            for (; *haystack; ++haystack) {
+                if (to_lower(*haystack) == n0_lower) {
+                    const char* h = haystack;
+                    const char* n = needle;
+                    while (*h && *n && to_lower(*h) == to_lower(*n)) {
+                        h++;
+                        n++;
+                    }
+                    if (!*n) {
+                        return haystack;
+                    }
+                }
+            }
+            return nullptr;
+        }
+
+        /* Checks if a std::string contains a substring (case-sensitive) */
+        static VMAWARE_FORCE_INLINE bool contains(const std::string& base_str, const char* keyword) noexcept {
+            return base_str.find(keyword) != std::string::npos;
+        }
+
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR_20 bool contains_ci(const char* haystack, const char* needle) noexcept {
+            if (!haystack || !needle) {
+                return false;
+            }
+            if (!*needle) {
+                return true;
+            }
+            const char n0_lower = to_lower(*needle);
+            for (; *haystack; ++haystack) {
+                if (to_lower(*haystack) == n0_lower) {
+                    const char* h = haystack;
+                    const char* n = needle;
+                    while (*h && *n && to_lower(*h) == to_lower(*n)) {
+                        h++;
+                        n++;
+                    }
+                    if (!*n) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /* Compares two null-terminated strings for equality (case-insensitive) */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR_20 bool equals_ci(const char* s1, const char* s2) noexcept {
+            if (!s1 || !s2) {
+                return s1 == s2;
+            }
+            while (*s1 && *s2) {
+                if (to_lower(*s1) != to_lower(*s2)) {
+                    return false;
+                }
+                s1++;
+                s2++;
+            }
+            return *s1 == *s2;
+        }
+
+        /* Converts a std::string to lowercase in place */
+        static VMAWARE_FORCE_INLINE void to_lower_inplace(std::string& str) noexcept {
+            const size_t len = str.length();
+            for (size_t i = 0; i < len; ++i) {
+                str[i] = to_lower(str[i]);
+            }
+        }
+
+        /* Trims leading and trailing whitespaces from a std::string in place */
+        static VMAWARE_FORCE_INLINE void trim_inplace(std::string& s) noexcept {
+            while (!s.empty() && is_space(s.front())) {
+                s.erase(s.begin());
+            }
+            while (!s.empty() && is_space(s.back())) {
+                s.pop_back();
+            }
+        }
+
+        /* Trims leading whitespaces from a null-terminated string pointer */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR_20 const char* ltrim(const char* str) noexcept {
+            if (!str) {
+                return nullptr;
+            }
+            while (*str && is_space(*str)) {
+                str++;
+            }
+            return str;
+        }
+
+        /* Checks if a std::string consists only of numerical digits */
+        static VMAWARE_FORCE_INLINE bool is_numeric(const std::string& s) noexcept {
+            if (s.empty()) {
+                return false;
+            }
+            const size_t len = s.length();
+            for (size_t i = 0; i < len; ++i) {
+                if (!is_digit(s[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /* Helper to check for ASCII spaces (avoids locale overhead) */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool is_space(char c) noexcept {
+            return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+        }
+
+        /* Helper to check for ASCII digits */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool is_digit(char c) noexcept {
+            return c >= '0' && c <= '9';
+        }
+
+        /* Helper to check for hexadecimal characters */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool is_hex(char c) noexcept {
+            return (c >= '0' && c <= '9') || (to_lower(c) >= 'a' && to_lower(c) <= 'f');
+        }
+
+        /* Helper to check if a character is alphanumeric */
+        static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool is_alnum(char c) noexcept {
+            return (to_lower(c) >= 'a' && to_lower(c) <= 'z') || is_digit(c);
+        }
+    };
+
     /* Miscellaneous functionalities */
     struct util {
-        struct string {
-            /* Converts a single character to lowercase */
-            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR char to_lower(char c) noexcept {
-                return (c >= 'A' && c <= 'Z') ? static_cast<char>(c | 0x20) : c;
-            }
-
-            /* Converts a single character to uppercase */
-            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR char to_upper(char c) noexcept {
-                return (c >= 'a' && c <= 'z') ? static_cast<char>(c & 0xDF) : c;
-            }
-
-            /* Checks if a string starts with a specific prefix (case-sensitive) */
-            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool starts_with(const char* str, const char* prefix) noexcept {
-                if (!str || !prefix) return false;
-                while (*prefix) {
-                    if (*str++ != *prefix++) return false;
-                }
-                return true;
-            }
-
-            /* Checks if a string starts with a specific prefix (case-insensitive) */
-            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR bool starts_with_ci(const char* str, const char* prefix) noexcept {
-                if (!str || !prefix) return false;
-                while (*prefix) {
-                    if (to_lower(*str++) != to_lower(*prefix++)) return false;
-                }
-                return true;
-            }
-
-            /* Finds a substring inside a null-terminated string (case-sensitive) */
-            static VMAWARE_FORCE_INLINE VMAWARE_CONSTEXPR const char* find(const char* haystack, const char* needle) noexcept {
-                if (!haystack || !needle) return nullptr;
-                if (!*needle) return haystack;
-                for (; *haystack; ++haystack) {
-                    if (*haystack == *needle) {
-                        const char* h = haystack;
-                        const char* n = needle;
-                        while (*h && *n && *h == *n) {
-                            h++;
-                            n++;
-                        }
-                        if (!*n) return haystack;
-                    }
-                }
-                return nullptr;
-            }
-
-            /* Finds a substring inside a null-terminated string (case-insensitive) */
-            static const char* find_ci(const char* haystack, const char* needle) noexcept {
-                if (!haystack || !needle) return nullptr;
-                if (!*needle) return haystack;
-                const char n0_lower = to_lower(*needle);
-                for (; *haystack; ++haystack) {
-                    if (to_lower(*haystack) == n0_lower) {
-                        const char* h = haystack;
-                        const char* n = needle;
-                        while (*h && *n && to_lower(*h) == to_lower(*n)) {
-                            h++;
-                            n++;
-                        }
-                        if (!*n) return haystack;
-                    }
-                }
-                return nullptr;
-            }
-
-            /* Checks if a std::string contains a substring (case-sensitive) */
-            static VMAWARE_FORCE_INLINE bool contains(const std::string& base_str, const char* keyword) noexcept {
-                return base_str.find(keyword) != std::string::npos;
-            }
-
-            /* Checks if a std::string contains a substring (case-insensitive) */
-            static VMAWARE_FORCE_INLINE bool contains_ci(const std::string& base_str, const char* keyword) noexcept {
-                return find_ci(base_str.c_str(), keyword) != nullptr;
-            }
-
-            /* Compares two null-terminated strings for equality (case-insensitive) */
-            static VMAWARE_FORCE_INLINE bool equals_ci(const char* s1, const char* s2) noexcept {
-                if (!s1 || !s2) return s1 == s2;
-                while (*s1 && *s2) {
-                    if (to_lower(*s1) != to_lower(*s2)) return false;
-                    s1++;
-                    s2++;
-                }
-                return *s1 == *s2;
-            }
-
-            /* Converts a std::string to lowercase in place */
-            static VMAWARE_FORCE_INLINE void to_lower_inplace(std::string& str) noexcept {
-                const size_t len = str.length();
-                for (size_t i = 0; i < len; ++i) {
-                    str[i] = to_lower(str[i]);
-                }
-            }
-
-            /* Trims leading and trailing whitespaces from a std::string in place */
-            static VMAWARE_FORCE_INLINE void trim_inplace(std::string& s) noexcept {
-                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
-                    s.erase(s.begin());
-                }
-                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
-                    s.pop_back();
-                }
-            }
-
-            /* Trims leading whitespaces from a null-terminated string pointer */
-            static VMAWARE_FORCE_INLINE const char* ltrim(const char* str) noexcept {
-                if (!str) return nullptr;
-                while (*str && std::isspace(static_cast<unsigned char>(*str))) {
-                    str++;
-                }
-                return str;
-            }
-
-            /* Checks if a std::string consists only of numerical digits */
-            static VMAWARE_FORCE_INLINE bool is_numeric(const std::string& s) noexcept {
-                if (s.empty()) return false;
-                const size_t len = s.length();
-                for (size_t i = 0; i < len; ++i) {
-                    if (!std::isdigit(static_cast<unsigned char>(s[i]))) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-        };
-
         [[nodiscard]] static constexpr bool is_unsupported(const VM::enum_flags flag) noexcept {
             return (flag >= VM::HYPERVISOR_BIT && flag <= VM::KGT_SIGNATURE) ? false :
             #if (LINUX)
@@ -4659,7 +4758,7 @@ public:
                     continue;
                 }
             #endif
-                if (!util::string::is_numeric(filename)) {
+                if (!string::is_numeric(filename)) {
                     continue;
                 }
 
@@ -4713,7 +4812,7 @@ public:
             static const bool cached = []() -> bool {
             #if (WINDOWS)
                 const char* brand = cpu::get_brand();
-                if (brand && util::string::find(brand, "Virtual CPU")) {
+                if (brand && string::find(brand, "Virtual CPU")) {
                     return true;
                 }
 
@@ -4844,8 +4943,9 @@ public:
                 u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
 
                 cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::hv_interface);
-                if (eax != 0x31237648) /* Hv#1 interface */
+                if (eax != 0x31237648) { /* Hv#1 interface */
                     return false;
+                }
 
                 cpu::cpuid(eax, ebx, ecx, edx, cpu::leaf::hv_nested); /* Hypervisor level of the current guest */
                 const u32 guest_level = (eax >> 10) & 0xF;
@@ -4856,7 +4956,9 @@ public:
             /* Check if the HAL path HalpInitializeErrSrc->HalpInitializeMce->HalpMceInit->HalpHvInitMcaPcrContext is initializing machine-check/WHEA state in a hypervisor-aware context */
             auto is_halh_present = []() noexcept -> bool {
                 const HMODULE ntdll = memory::get_module(true);
-                if (!ntdll) return true;
+                if (!ntdll) {
+                    return true;
+                }
 
                 constexpr const char* function_names[] = {
                     "NtQuerySystemInformation"
@@ -4866,7 +4968,9 @@ public:
 
                 using nt_query_sysinfo_fn = NTSTATUS(__stdcall*)(ULONG, PVOID, ULONG, PULONG);
                 nt_query_sysinfo_fn nt_query_system_information = reinterpret_cast<nt_query_sysinfo_fn>(functions[0]);
-                if (!nt_query_system_information) return false;
+                if (!nt_query_system_information) {
+                    return false;
+                }
 
                 struct entry_struct { ULONG Tag; ULONG PA; ULONG PF; SIZE_T PU; ULONG NPA; ULONG NPF; SIZE_T NPU; };
                 struct info_struct { ULONG Count; entry_struct TagInfo[1]; };
@@ -4874,7 +4978,9 @@ public:
                 ULONG size = 1024 * 1024;
                 HANDLE heap = GetProcessHeap();
                 PVOID buffer = HeapAlloc(heap, HEAP_ZERO_MEMORY, size);
-                if (!buffer) return true;
+                if (!buffer) {
+                    return true;
+                }
 
                 ULONG needed = 0;
                 while (nt_query_system_information(0x16, buffer, size, &needed) == static_cast<NTSTATUS>(0xC0000004L)) {
@@ -5000,12 +5106,18 @@ public:
                 }
 
                 bool found_hyperv = false;
+                bool parse_error = false;
                 do {
-                    if (log_size < 32) break;
+                    if (log_size < 32) {
+                        parse_error = true;
+                        break;
+                    }
                     const auto* const first_event = reinterpret_cast<const tcg_pcr_event_header*>(log_buffer);
                     const size_t first_event_size = static_cast<size_t>(32) + first_event->event_data_size;
-                    if (first_event_size > log_size) break;
-
+                    if (first_event_size > log_size) {
+                        parse_error = true;
+                        break;
+                    }
                     const bool crypto_agile = (first_event->event_data_size >= 16 && memcmp(first_event->event_data, "Spec ID Event03", 15) == 0);
 
                     struct alg_size_pair {
@@ -5043,6 +5155,14 @@ public:
                                     }
                                 }
                             }
+                            else {
+                                parse_error = true;
+                                break;
+                            }
+                        }
+                        else {
+                            parse_error = true;
+                            break;
                         }
                     }
 
@@ -5056,13 +5176,37 @@ public:
                     const auto scan_targets = [&](const u32 pcr, const u32 event_size, const u8* const event_data) -> bool {
                         if (pcr == 11 || pcr == 13) {
                             for (const auto& target : hyperv_targets) {
-                                const auto* const pat = reinterpret_cast<const u8*>(target);
                                 size_t target_len = 0;
-                                while (target[target_len] != L'\0') target_len++;
+                                while (target[target_len] != L'\0') {
+                                    target_len++;
+                                }
                                 const size_t len = target_len * 2;
 
-                                if (event_size >= len && std::search(event_data, event_data + event_size, pat, pat + len) != event_data + event_size) {
-                                    return true;
+                                if (event_size < len) {
+                                    continue;
+                                }
+
+                                for (size_t i = 0; i <= event_size - len; i += 2) {
+                                    bool match = true;
+                                    for (size_t j = 0; j < target_len; ++j) {
+                                        wchar_t log_char = static_cast<wchar_t>(event_data[i + (j * 2)] | (event_data[i + (j * 2) + 1] << 8));
+                                        wchar_t target_char = target[j];
+
+                                        if (log_char >= L'A' && log_char <= L'Z') {
+                                            log_char = log_char - L'A' + L'a';
+                                        }
+                                        if (target_char >= L'A' && target_char <= L'Z') {
+                                            target_char = target_char - L'A' + L'a';
+                                        }
+
+                                        if (log_char != target_char) {
+                                            match = false;
+                                            break;
+                                        }
+                                    }
+                                    if (match) {
+                                        return true;
+                                    }
                                 }
                             }
                         }
@@ -5071,42 +5215,70 @@ public:
 
                     while (offset < log_size) {
                         if (crypto_agile) {
-                            if (offset + 12 > log_size) break;
+                            if (offset + 12 > log_size) {
+                                parse_error = true;
+                                break;
+                            }
                             const u32 pcr = *reinterpret_cast<const u32*>(log_buffer + offset);
                             const u32 digest_count = *reinterpret_cast<const u32*>(log_buffer + offset + 8);
 
                             size_t temp = offset + 12;
+                            bool alg_error = false;
                             for (u32 i = 0; i < digest_count && temp + 2 <= log_size; ++i) {
                                 const u16 alg_id = *reinterpret_cast<const u16*>(log_buffer + temp);
                                 u16 digest_size = 0;
+                                bool alg_found = false;
                                 for (size_t j = 0; j < alg_count; ++j) {
                                     if (alg_sizes[j].alg_id == alg_id) {
                                         digest_size = alg_sizes[j].digest_size;
+                                        alg_found = true;
                                         break;
                                     }
+                                }
+                                if (!alg_found || digest_size == 0) {
+                                    alg_error = true;
+                                    break;
                                 }
                                 temp += static_cast<unsigned long long>(2) + digest_size;
                             }
 
-                            if (temp + 4 > log_size) break;
+                            if (alg_error || temp + 4 > log_size) {
+                                parse_error = true;
+                                break;
+                            }
                             const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + temp);
                             const u8* const event_data = log_buffer + temp + 4;
                             offset = temp + 4 + event_size;
 
-                            if (offset <= log_size && scan_targets(pcr, event_size, event_data)) {
-                                found_hyperv = true;
+                            if (offset <= log_size) {
+                                if (scan_targets(pcr, event_size, event_data)) {
+                                    found_hyperv = true;
+                                    break;
+                                }
+                            }
+                            else {
+                                parse_error = true;
                                 break;
                             }
                         }
                         else {
-                            if (offset + 32 > log_size) break;
+                            if (offset + 32 > log_size) {
+                                parse_error = true;
+                                break;
+                            }
                             const u32 pcr = *reinterpret_cast<const u32*>(log_buffer + offset);
                             const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + offset + 28);
                             const u8* const event_data = log_buffer + offset + 32;
                             offset += 32 + static_cast<unsigned long long>(event_size);
 
-                            if (offset <= log_size && scan_targets(pcr, event_size, event_data)) {
-                                found_hyperv = true;
+                            if (offset <= log_size) {
+                                if (scan_targets(pcr, event_size, event_data)) {
+                                    found_hyperv = true;
+                                    break;
+                                }
+                            }
+                            else {
+                                parse_error = true;
                                 break;
                             }
                         }
@@ -5114,11 +5286,16 @@ public:
                 } while (false);
 
                 delete[] log_buffer;
+
+                if (parse_error) {
+                    return true;
+                }
+
                 return found_hyperv;
             };
 
             const char* enlightenment_str = cpu::cpu_manufacturer(cpu::leaf::hv_enlightenment);
-            if (enlightenment_str && util::find(enlightenment_str, "KVM")) {
+            if (enlightenment_str && string::find(enlightenment_str, "KVM")) {
                 debug("HYPER-X: Detected Hyper-V enlightenments");
                 core::add(brand_enum::QEMU_KVM_HYPERV);
                 memo::hyperx::store(HYPERV_ENLIGHTENMENT);
@@ -5179,7 +5356,9 @@ public:
     #if (WINDOWS)
         [[nodiscard]] static bool is_windows_11() noexcept {
             const HMODULE ntdll = memory::get_module(true);
-            if (!ntdll) return false;
+            if (!ntdll) {
+                return false;
+            }
 
             const char* function_names[] = { "RtlGetVersion" };
             void* functions[ARRAYSIZE(function_names)] = {};
@@ -5187,7 +5366,9 @@ public:
 
             using rtl_get_version_fn = NTSTATUS(__stdcall*)(PRTL_OSVERSIONINFOW);
             const auto rtl_get_version = reinterpret_cast<rtl_get_version_fn>(functions[0]);
-            if (!rtl_get_version) return false;
+            if (!rtl_get_version) {
+                return false;
+            }
 
             RTL_OSVERSIONINFOW vi{};
             vi.dwOSVersionInfoSize = sizeof(vi);
@@ -5197,7 +5378,9 @@ public:
 
         [[nodiscard]] static bool is_windows_8_or_newer() noexcept {
             const HMODULE ntdll = memory::get_module(true);
-            if (!ntdll) return false;
+            if (!ntdll) {
+                return false;
+            }
 
             const char* function_names[] = { "RtlGetVersion" };
             void* functions[ARRAYSIZE(function_names)] = {};
@@ -5205,7 +5388,9 @@ public:
 
             using rtl_get_version_fn = NTSTATUS(__stdcall*)(PRTL_OSVERSIONINFOW);
             const auto rtl_get_version = reinterpret_cast<rtl_get_version_fn>(functions[0]);
-            if (!rtl_get_version) return false;
+            if (!rtl_get_version) {
+                return false;
+            }
 
             RTL_OSVERSIONINFOW vi{};
             vi.dwOSVersionInfoSize = sizeof(vi);
@@ -5231,28 +5416,38 @@ public:
         }
 
         [[nodiscard]] static bool get_manufacturer_model(const char** out_manufacturer, const char** out_model) noexcept {
-            if (out_manufacturer) *out_manufacturer = "";
-            if (out_model) *out_model = "";
+            if (out_manufacturer) {
+                *out_manufacturer = "";
+            }
+            if (out_model) {
+                *out_model = "";
+            }
 
             if (memo::bios_info::is_cached()) {
                 const char* man = memo::bios_info::fetch_manufacturer();
                 const char* mod = memo::bios_info::fetch_model();
 
-                if (out_manufacturer) *out_manufacturer = man;
-                if (out_model) *out_model = mod;
+                if (out_manufacturer) {
+                    *out_manufacturer = man;
+                }
+                if (out_model) {
+                    *out_model = mod;
+                }
 
                 return (man && man[0] != '\0') || (mod && mod[0] != '\0');
             }
 
             auto is_placeholder = [](const char* s) noexcept -> bool {
-                if (!s || !*s) return true;
+                if (!s || !*s) {
+                    return true;
+                }
 
                 return 
-                    util::string::equals_ci(s, "System Product Name") ||
-                    util::string::equals_ci(s, "To Be Filled By O.E.M.") ||
-                    util::string::equals_ci(s, "Default string") ||
-                    util::string::equals_ci(s, "Not Specified") ||
-                    util::string::equals_ci(s, "None");
+                    string::equals_ci(s, "System Product Name") ||
+                    string::equals_ci(s, "To Be Filled By O.E.M.") ||
+                    string::equals_ci(s, "Default string") ||
+                    string::equals_ci(s, "Not Specified") ||
+                    string::equals_ci(s, "None");
             };
 
             auto read_reg_utf8 = [](const wchar_t* value_name, char* out, size_t out_size) noexcept -> bool {
@@ -5357,8 +5552,12 @@ public:
 
             memo::bios_info::cached = true;
 
-            if (out_manufacturer) *out_manufacturer = memo::bios_info::fetch_manufacturer();
-            if (out_model) *out_model = memo::bios_info::fetch_model();
+            if (out_manufacturer) {
+                *out_manufacturer = memo::bios_info::fetch_manufacturer();
+            }
+            if (out_model) {
+                *out_model = memo::bios_info::fetch_model();
+            }
 
             return got_any;
         }
@@ -5381,7 +5580,9 @@ public:
 
             /* Software fallback CRC32-C (Castagnoli) of a block of memory */
             static u32 crc32c_sw(u32 crc, const void* VMAWARE_RESTRICT data, const size_t len) noexcept {
-                if (len > 0) VMAWARE_ASSUME(data != nullptr); 
+                if (len > 0) {
+                    VMAWARE_ASSUME(data != nullptr);
+                }
                 const u8* ptr = reinterpret_cast<const u8*>(data);
 
                 for (size_t i = 0; i < len; ++i) {
@@ -5693,9 +5894,9 @@ public:
                 std::sort(active_brands.begin(), active_brands.begin() + static_cast<std::ptrdiff_t>(active_brands.size()), [](
                     const brand_element_t& a,
                     const brand_element_t& b
-                    ) {
-                        return a.second > b.second; /* .second is brand score */
-                });
+                ) {
+                    return a.second > b.second; /* .second is brand score */  
+                } );
             }
 
             memo::brand_list::store(active_brands, flags);
@@ -5867,7 +6068,7 @@ public:
              return false;
          }
 
-         if (util::string::starts_with(brand, "QEMU Virtual CPU version")) {
+         if (string::starts_with(brand, "QEMU Virtual CPU version")) {
              return core::add(brand_enum::QEMU);
          }
 
@@ -5886,16 +6087,16 @@ public:
          };
 
          for (const auto& c : checks) {
-             if (util::string::find(brand, c.text)) {
+             if (string::find(brand, c.text)) {
                  debug("CPU_BRAND: match = ", c.text);
                  return core::add(c.brand);
              }
          }
 
          if (
-             util::string::find(brand, "monitor")    ||
-             util::string::find(brand, "hypervisor") ||
-             util::string::find(brand, "hvisor")
+             string::find(brand, "monitor")    ||
+             string::find(brand, "hypervisor") ||
+             string::find(brand, "hvisor")
             )
          {
              debug("CPU_BRAND: generic virtualization match");
@@ -6144,7 +6345,7 @@ public:
                 if (f) {
                     std::string s;
                     if (std::getline(f, s)) {
-                        util::string::trim_inplace(s);
+                        string::trim_inplace(s);
 
                         if (s == "on") {
                             return true;
@@ -6162,7 +6363,7 @@ public:
                 if (f) {
                     std::string s;
                     if (std::getline(f, s)) {
-                        util::string::trim_inplace(s);
+                        string::trim_inplace(s);
 
                         if (s == "1") {
                             return true;
@@ -6180,7 +6381,7 @@ public:
                 if (f) {
                     std::string s;
                     if (std::getline(f, s)) {
-                        util::string::trim_inplace(s);
+                        string::trim_inplace(s);
 
                         for (char ch : s) {
                             if (ch == ',' || ch == '-') {
@@ -6211,8 +6412,8 @@ public:
                         std::string key = line.substr(0, pos);
                         std::string val = line.substr(pos + 1);
 
-                        util::string::trim_inplace(key);
-                        util::string::trim_inplace(val);
+                        string::trim_inplace(key);
+                        string::trim_inplace(val);
 
                         if (key == "siblings") {
                             try { siblings = std::stoi(val); }
@@ -6290,7 +6491,8 @@ public:
 
                 while (true) {
                     char k = str[j];
-                    const bool is_valid = (k >= '0' && k <= '9') ||
+                    const bool is_valid = 
+                        (k >= '0' && k <= '9') ||
                         (k >= 'A' && k <= 'Z') ||
                         (k >= 'a' && k <= 'z') ||
                         (k == '-');
@@ -6315,7 +6517,8 @@ public:
                     j++;
 
                     const char next = str[j];
-                    const bool next_is_alnum = (next >= '0' && next <= '9') ||
+                    const bool next_is_alnum = 
+                        (next >= '0' && next <= '9') ||
                         (next >= 'A' && next <= 'Z') ||
                         (next >= 'a' && next <= 'z');
 
@@ -6433,7 +6636,9 @@ public:
                 cpu::cpuid(unused, l1_ebx, unused, unused, cpu::leaf::features, 0);
                 aba_end = (l1_ebx >> 24) & 0xFF;
 
-                if (aba_start == aba_end || ++retries >= 8) { break; }
+                if (aba_start == aba_end || ++retries >= 8) { 
+                    break; 
+                }
             }
 
             /*
@@ -6717,7 +6922,9 @@ public:
                     !whv_run_virtual_processor || !whv_delete_partition || !nt_allocate_virtual_memory ||
                     !nt_free_virtual_memory || !nt_query_system_time)
                 {
-                    if (winhv_dll) FreeLibrary(winhv_dll);
+                    if (winhv_dll) {
+                        FreeLibrary(winhv_dll);
+                    }
                     winhv_dll = nullptr;
                     debug("TIMER: Not all modules required to run the nested check could be found");
                     check_nested_hypervisors = false;
@@ -7022,8 +7229,12 @@ public:
                 const timer::timer_tick_t ref_l = timer::engine::calculate_latency(active_ref_samples);
 
                 /* Record the cleanest/lowest latency observed across the independent trials */
-                if (cpuid_l < best_cpuid_l) best_cpuid_l = cpuid_l;
-                if (ref_l < best_ref_l) best_ref_l = ref_l;
+                if (cpuid_l < best_cpuid_l) {
+                    best_cpuid_l = cpuid_l;
+                }
+                if (ref_l < best_ref_l) {
+                    best_ref_l = ref_l;
+                }
             }
 
             /* If Hyper-V is enabled, check if there's another hypervisor sitting on top of Hyper-V with an unconditional vmexit */
@@ -7108,8 +7319,12 @@ public:
                     const timer::timer_tick_t npf_l = timer::engine::calculate_latency(active_npf_samples);
                     const timer::timer_tick_t add_l = timer::engine::calculate_latency(active_add_samples);
 
-                    if (npf_l < best_npf_l) best_npf_l = npf_l;
-                    if (add_l < best_add_l) best_add_l = add_l;
+                    if (npf_l < best_npf_l) {
+                        best_npf_l = npf_l;
+                    }
+                    if (add_l < best_add_l) {
+                        best_add_l = add_l;
+                    }
                 }
 
                 if (npf_locked) {
@@ -7157,7 +7372,9 @@ public:
         if (check_nested_hypervisors) {
             const double npf_ratio = best_add_l ? (double)best_npf_l / (double)best_add_l : 0;
             debug("TIMER: Memory > VMM -> ", best_npf_l, " | nVMM -> ", best_add_l, " | Ratio -> ", npf_ratio);
-            if (npf_ratio >= 4.00 || nested_bypass_detected) hypervisor_detected = true;
+            if (npf_ratio >= 4.00 || nested_bypass_detected) {
+                hypervisor_detected = true;
+            }
         }
 
         /* Cleanup stuff until end of function */
@@ -7337,8 +7554,14 @@ public:
         struct fdguard {
             int fd;
             explicit fdguard(int fd = -1) : fd(fd) {}
-            ~fdguard() { if (fd != -1) { ::close(fd); } }
-            int get() const { return fd; }
+            ~fdguard() { 
+                if (fd != -1) { 
+                    ::close(fd); 
+                } 
+            }
+            int get() const { 
+                return fd; 
+            }
             int release() { 
                 const int tmp = fd; 
                 fd = -1; 
@@ -7356,12 +7579,12 @@ public:
         if (sock == -1) {
             return false;
         }
-        const fdguard sockGuard(sock); /* will close on function exit */
+        const fdguard sock_guard(sock); /* will close on function exit */
 
         ifc.ifc_len = sizeof(buf);
         ifc.ifc_buf = buf;
 
-        if (ioctl(sockGuard.get(), SIOCGIFCONF, &ifc) == -1) {
+        if (ioctl(sock_guard.get(), SIOCGIFCONF, &ifc) == -1) {
             return false;
         }
 
@@ -7373,12 +7596,12 @@ public:
             memcpy(ifr.ifr_name, it->ifr_name, name_len);
             *(ifr.ifr_name + name_len) = '\0';
 
-            if (ioctl(sockGuard.get(), SIOCGIFFLAGS, &ifr) != 0) {
+            if (ioctl(sock_guard.get(), SIOCGIFFLAGS, &ifr) != 0) {
                 return false;
             }
 
             if (!(ifr.ifr_flags & IFF_LOOPBACK)) {
-                if (ioctl(sockGuard.get(), SIOCGIFHWADDR, &ifr) == 0) {
+                if (ioctl(sock_guard.get(), SIOCGIFHWADDR, &ifr) == 0) {
                     success = 1;
                     break;
                 }
@@ -7407,9 +7630,7 @@ public:
             return false;
         }
 
-        const u32 prefix = static_cast<u32>(mac[0])
-            | (static_cast<u32>(mac[1]) << 8)
-            | (static_cast<u32>(mac[2]) << 16);
+        const u32 prefix = static_cast<u32>(mac[0]) | (static_cast<u32>(mac[1]) << 8) | (static_cast<u32>(mac[2]) << 16);
 
         constexpr u32 VBOX = 0x270008;  /* 08:00:27 */
         constexpr u32 VMW1 = 0x29000C;  /* 00:0C:29 */
@@ -7592,9 +7813,15 @@ public:
             return false;
         }
 
-        if (result & (static_cast<u64>(1) << 2)) { return core::add(brand_enum::AMD_SEV_SNP); }
-        if (result & (static_cast<u64>(1) << 1)) { return core::add(brand_enum::AMD_SEV_ES); }
-        if (result & 1) { return core::add(brand_enum::AMD_SEV); }
+        if (result & (static_cast<u64>(1) << 2)) { 
+            return core::add(brand_enum::AMD_SEV_SNP); 
+        }
+        if (result & (static_cast<u64>(1) << 1)) { 
+            return core::add(brand_enum::AMD_SEV_ES); 
+        }
+        if (result & 1) { 
+            return core::add(brand_enum::AMD_SEV);
+        }
 
         return false;
     #else
@@ -7612,17 +7839,11 @@ public:
         const char* sys_vendor = "/sys/devices/virtual/dmi/id/sys_vendor";
         const char* modalias = "/sys/devices/virtual/dmi/id/modalias";
 
-        if (
-            util::exists(sys_vendor) &&
-            util::exists(modalias)
-        ) {
+        if (util::exists(sys_vendor) && util::exists(modalias)) {
             const std::string sys_vendor_str = util::read_file(sys_vendor);
             const std::string modalias_str = util::read_file(modalias);
 
-            if (
-                util::find(sys_vendor_str, "QEMU") &&
-                util::find(modalias_str, "QEMU")
-            ) {
+            if (util::find(sys_vendor_str, "QEMU") && util::find(modalias_str, "QEMU")) {
                 return core::add(brand_enum::QEMU);
             }
         }
@@ -7908,10 +8129,10 @@ public:
                 continue;
             }
 
-            util::string::to_lower_inplace(content);
+            string::to_lower_inplace(content);
 
             for (const auto& vm_string : vm_table) {
-                if (util::string::contains(content, vm_string.first)) {
+                if (string::contains(content, vm_string.first)) {
                     debug("DMI_SCAN: content = ", content);
 
                     if (vm_string.second == brand_enum::AWS_NITRO) {
@@ -8289,7 +8510,9 @@ public:
             debug("SIDT: values = ");
             for (u8 i = 0; i < 10; ++i) {
                 debug(std::hex, std::setw(2), std::setfill('0'), static_cast<u32>(values[i]));
-                if (i < 9) debug(" ");
+                if (i < 9) {
+                    debug(" ");
+                }
             }
         #endif
 
@@ -8304,11 +8527,15 @@ public:
             debug("SIDT: values = ");
             for (u8 i = 0; i < 6; ++i) {
                 debug(std::hex, std::setw(2), std::setfill('0'), static_cast<u32>(values[i]));
-                if (i < 5) debug(" ");
+                if (i < 5) {
+                    debug(" ");
+                }
             }
         #endif
 
-            if (values[5] == 0x00) found = true; /* 6th byte in x86 mode */
+            if (values[5] == 0x00) {
+                found = true; /* 6th byte in x86 mode */
+            }
         #endif
 
         /* Windows - SGDT, SLDT, SIDT, SMSW */
@@ -8429,7 +8656,9 @@ public:
                         }
                     }
                 }
-                if (found) break;
+                if (found) {
+                    break;
+                }
             }
 
             SetThreadGroupAffinity(current_thread, &original_group_aff, nullptr);
@@ -8505,17 +8734,18 @@ public:
         return false;
     #endif
 
-        if (memcmp(buf, "runnervm", 8) != 0) {
+        if (!string::starts_with(buf, "runnervm")) {
             return false;
         }
 
-        const unsigned int is_match = is_alnum_ascii(buf[8]) &
-            is_alnum_ascii(buf[9]) &
-            is_alnum_ascii(buf[10]) &
-            is_alnum_ascii(buf[11]) &
-            is_alnum_ascii(buf[12]);
+        const bool is_match = 
+            string::is_alnum(buf[8]) &&
+            string::is_alnum(buf[9]) &&
+            string::is_alnum(buf[10]) &&
+            string::is_alnum(buf[11]) &&
+            string::is_alnum(buf[12]);
 
-        if (is_match != 0u) {
+        if (is_match) {
             return core::add(brand_enum::AZURE_HYPERV);
         }
         return false;
@@ -8619,7 +8849,9 @@ public:
 
         auto scan_buffer = [&](const u8* buffer, const size_t buffer_len, const bool is_acpi) noexcept -> bool {
             auto find_pattern = [&](const char* pattern, size_t pattern_len) noexcept -> bool {
-                if (pattern_len == 0 || pattern_len > buffer_len) return false;
+                if (pattern_len == 0 || pattern_len > buffer_len) {
+                    return false;
+                }
                 const u8 first_byte = static_cast<u8>(pattern[0]);
                 const u8* base_ptr = buffer;
                 const u8* search_ptr = base_ptr;
@@ -8628,11 +8860,17 @@ public:
                 while (remaining_bytes >= pattern_len) {
                     VMAWARE_PREFETCH(search_ptr + 64, _MM_HINT_T0);
                     const void* match = memchr(search_ptr, first_byte, remaining_bytes);
-                    if (!match) return false;
+                    if (!match) {
+                        return false;
+                    }
                     const u8* match_ptr = static_cast<const u8*>(match);
                     const size_t index = static_cast<size_t>(match_ptr - base_ptr);
-                    if (index + pattern_len > buffer_len) return false;
-                    if (memcmp(match_ptr, pattern, pattern_len) == 0) return true;
+                    if (index + pattern_len > buffer_len) {
+                        return false;
+                    }
+                    if (memcmp(match_ptr, pattern, pattern_len) == 0) {
+                        return true;
+                    }
                     search_ptr = match_ptr + 1;
                     remaining_bytes = buffer_len - static_cast<size_t>(search_ptr - base_ptr);
                 }
@@ -8677,7 +8915,7 @@ public:
                         bool is_acer_aspire = false;
 
                         if (util::get_manufacturer_model(&man, &mod)) {
-                            if (util::string::find_ci(man, "Acer") && util::string::find_ci(mod, "Aspire")) {
+                            if (string::find_ci(man, "Acer") && string::find_ci(mod, "Aspire")) {
                                 is_acer_aspire = true;
                             }
                         }
@@ -8781,20 +9019,22 @@ public:
                     }
 
                     /* HPET dynamic check logic (VEND / PRD threshold) with a constant-agnostic structural _STA check */
-                    if (find_pattern("HPET", 4)) {
-                        /* Search the buffer for: LEqualOp (0x93), Local1 (0x61), ZeroOp (0x00) */
-                        /* followed closely by LGreaterOp (0x94), Local1 (0x61) */
-                        const u8* ptr = buffer;
-                        const size_t end_offset = buffer_len >= 12 ? buffer_len - 12 : 0;
+                    /* Search for the exact QEMU HPET period limit: LOr(LEqual(Local1, Zero), LGreater(Local1, 0x05F5E100)) */
+                    static const u8 qemu_hpet_signature[] = {
+                        0x91, 0x93, 0x61, 0x00, // LOr, LEqual, Local1, Zero
+                        0x94, 0x61,             // LGreater, Local1
+                        0x0C, 0x00, 0xE1, 0xF5, 0x05 // DWordPrefix, 0x05F5E100
+                    };
 
-                        for (size_t i = 0; i < end_offset; ++i) {
-                            if (ptr[i] == 0x93 && ptr[i + 1] == 0x61 && ptr[i + 2] == 0x00) {
-                                /* Scan a tight window ahead to find the companion LGreater(Local1, <any integer>) */
-                                for (size_t j = 3; j < 12 && i + j + 1 < buffer_len; ++j) {
-                                    if (ptr[i + j] == 0x94 && ptr[i + j + 1] == 0x61) {
-                                        debug("FIRMWARE: Detected QEMU HPET structural register-validation loop");
-                                        return core::add(brand_enum::QEMU);
-                                    }
+                    if (find_pattern("HPET", 4)) {
+                        const u8* ptr = buffer;
+                        if (buffer_len >= sizeof(qemu_hpet_signature)) {
+                            const size_t end_offset = buffer_len - sizeof(qemu_hpet_signature);
+
+                            for (size_t i = 0; i <= end_offset; ++i) {
+                                if (memcmp(&ptr[i], qemu_hpet_signature, sizeof(qemu_hpet_signature)) == 0) {
+                                    debug("FIRMWARE: Detected QEMU HPET period-validation signature");
+                                    return core::add(brand_enum::QEMU);
                                 }
                             }
                         }
@@ -8825,27 +9065,33 @@ public:
             for (size_t i = 0; i < targets.size(); ++i) {
                 const char* pattern = targets[i];
                 const size_t pattern_len = strlen(pattern);
-                if (pattern_len > buffer_len) continue;
+                if (pattern_len > buffer_len) {
+                    continue;
+                }
 
                 if (find_pattern(pattern, pattern_len)) {
                     /* Special handling for Xen: must not have PXEN to prevent false flagging some bare metal systems */
                     if (strcmp(pattern, "Xen") == 0) {
                         constexpr char pxen[] = "PXEN";
                         constexpr size_t pxen_len = sizeof(pxen) - 1;
-                        if (!find_pattern(pxen, pxen_len))
+                        if (!find_pattern(pxen, pxen_len)) {
                             return core::add(brand_enum::XEN);
-                        else
+                        }
+                        else {
                             continue;
+                        }
                     }
 
                     /* Special handling for BOCHS: if BXPC is detected, check if "BOCHS" is present too */
                     if (strcmp(pattern, "BXPC") == 0) {
                         constexpr char bochs[] = "BOCHS";
                         constexpr size_t bochs_len = sizeof(bochs) - 1;
-                        if (!find_pattern(bochs, bochs_len))
+                        if (!find_pattern(bochs, bochs_len)) {
                             return core::add(brand_enum::BOCHS);
-                        else
+                        }
+                        else {
                             continue;
+                        }
                     }
 
                     debug("FIRMWARE: Detected ", pattern);
@@ -9020,28 +9266,33 @@ public:
         /* Enumerate ACPI tables */
         constexpr DWORD acpi_signature = 'ACPI';
         const DWORD acpi_enum_size = EnumSystemFirmwareTables(acpi_signature, nullptr, 0);
-        if (acpi_enum_size == 0)
+        if (acpi_enum_size == 0) {
             return false;
-        if (acpi_enum_size % sizeof(DWORD) != 0)
+        }
+        if (acpi_enum_size % sizeof(DWORD) != 0) {
             return false;
+        }
 
         const size_t table_count = acpi_enum_size / sizeof(DWORD);
         std::vector<DWORD> tables(table_count);
-        if (EnumSystemFirmwareTables(acpi_signature, tables.data(), acpi_enum_size) != acpi_enum_size)
+        if (EnumSystemFirmwareTables(acpi_signature, tables.data(), acpi_enum_size) != acpi_enum_size) {
             return false;
+        }
 
         /* DSDT special fetch */
         {
             constexpr DWORD dsdt_sig = 'DSDT';
             constexpr DWORD dsdt_swapped =
-                ((dsdt_sig >> 24) & 0x000000FFu)
-                | ((dsdt_sig >> 8) & 0x0000FF00u)
-                | ((dsdt_sig << 8) & 0x00FF0000u)
+                  ((dsdt_sig >> 24) & 0x000000FFu)
+                | ((dsdt_sig >> 8)  & 0x0000FF00u)
+                | ((dsdt_sig << 8)  & 0x00FF0000u)
                 | ((dsdt_sig << 24) & 0xFF000000u);
 
             const UINT sz = GetSystemFirmwareTable(acpi_signature, dsdt_swapped, nullptr, 0);
             if (sz > 0) {
-                if (sz > work_buffer.capacity()) work_buffer.reserve(sz);
+                if (sz > work_buffer.capacity()) {
+                    work_buffer.reserve(sz);
+                }
                 work_buffer.resize(sz);
                 if (GetSystemFirmwareTable(acpi_signature, dsdt_swapped, work_buffer.data(), sz) == sz) {
                     if (scan_buffer(work_buffer.data(), work_buffer.size(), true)) {
@@ -9053,9 +9304,13 @@ public:
 
         auto fetch_and_scan = [&](const DWORD provider, const DWORD table_id, bool is_acpi) -> bool {
             const DWORD sz = GetSystemFirmwareTable(provider, table_id, nullptr, 0);
-            if (sz == 0) return false;
+            if (sz == 0) {
+                return false;
+            }
 
-            if (sz > work_buffer.capacity()) work_buffer.reserve(sz);
+            if (sz > work_buffer.capacity()) {
+                work_buffer.reserve(sz);
+            }
             work_buffer.resize(sz);
 
             if (GetSystemFirmwareTable(provider, table_id, work_buffer.data(), sz) != sz) {
@@ -9063,7 +9318,7 @@ public:
             }
 
             return scan_buffer(work_buffer.data(), sz, is_acpi);
-            };
+        };
 
         /* Scan every ACPI table */
         for (const auto table_id : tables) {
@@ -9077,13 +9332,19 @@ public:
 
         for (DWORD prov : smb_providers) {
             const UINT e = EnumSystemFirmwareTables(prov, nullptr, 0);
-            if (!e) continue;
-            if (e % sizeof(DWORD) != 0) continue;
+            if (!e) {
+                continue;
+            }
+            if (e % sizeof(DWORD) != 0) {
+                continue;
+            }
 
             const size_t cnt = e / sizeof(DWORD);
             std::vector<DWORD> provider_tables(cnt);
 
-            if (EnumSystemFirmwareTables(prov, provider_tables.data(), e) != e) continue;
+            if (EnumSystemFirmwareTables(prov, provider_tables.data(), e) != e) {
+                continue;
+            }
 
             for (const auto table_id : provider_tables) {
                 if (fetch_and_scan(prov, table_id, false)) {
@@ -9101,7 +9362,11 @@ public:
         const struct dir_closer { /* NOLINT(cppcoreguidelines-special-member-functions) */
             DIR* d;
             explicit dir_closer(DIR* dir) : d(dir) {}
-            ~dir_closer() { if (d) { closedir(d); } }
+            ~dir_closer() { 
+                if (d) { 
+                    closedir(d);
+                } 
+            }
         } dir(raw_dir);
 
         struct dirent* entry{};
@@ -9220,10 +9485,14 @@ public:
                 if (dir) {
                     while (struct dirent* ent = readdir(dir.get())) {
                         std::string name = ent->d_name;
-                        if (name == "." || name == "..") continue;
+                        if (name == "." || name == "..") {
+                            continue;
+                        }
                         std::string base = pci_path + "/" + name;
                         std::ifstream vf(base + "/vendor"), df(base + "/device");
-                        if (!vf || !df) continue;
+                        if (!vf || !df) {
+                            continue;
+                        }
                         u16 vid = 0; u32 did = 0;
                         vf >> std::hex >> vid;
                         df >> std::hex >> did;
@@ -9235,10 +9504,13 @@ public:
             constexpr DWORD MAX_MULTI_SZ = 64 * 1024;
 
             auto hex_val = [](wchar_t c) noexcept -> int {
-                if (c >= L'0' && c <= L'9') return c - L'0';
-
+                if (c >= L'0' && c <= L'9') {
+                    return c - L'0';
+                }
                 const wchar_t lower = static_cast<wchar_t>((static_cast<int>(c) | 0x20));
-                if (lower >= L'a' && lower <= L'f') return lower - L'a' + 10;
+                if (lower >= L'a' && lower <= L'f') {
+                    return lower - L'a' + 10;
+                }
 
                 return -1;
             };
@@ -9513,7 +9785,9 @@ public:
 
             using nt_query_sysinfo_fn = NTSTATUS(__stdcall*)(ULONG, PVOID, ULONG, PULONG); /* int is SYSTEM_INFORMATION_CLASS */
             nt_query_sysinfo_fn nt_query_system_information = reinterpret_cast<nt_query_sysinfo_fn>(functions[0]);
-            if (!nt_query_system_information) return false;
+            if (!nt_query_system_information) {
+                return false;
+            }
 
             /* Parse header to locate the bitmap */
             struct boot_logo_info { ULONG flags, bitmap_offset; };
@@ -9523,36 +9797,37 @@ public:
             NTSTATUS st = nt_query_system_information(sys_boot_info, nullptr, 0, &needed);
             if (st != static_cast<NTSTATUS>(0xC0000023) &&
                 st != static_cast<NTSTATUS>(0x80000005) &&
-                st != static_cast<NTSTATUS>(0xC0000004))
+                st != static_cast<NTSTATUS>(0xC0000004)) { 
                 return false;
-
+            }
             std::vector<u8> buffer(needed);
 
             /* Fetch the boot-logo data */
             st = nt_query_system_information(sys_boot_info, buffer.data(), needed, &needed);
-            if (!NT_SUCCESS(st))
+            if (!NT_SUCCESS(st)) {
                 return false;
+            }
 
-            if (needed < sizeof(boot_logo_info))
+            if (needed < sizeof(boot_logo_info)) {
                 return false;
+            }
 
             const auto* info = reinterpret_cast<const boot_logo_info*>(buffer.data());
-            if (info->bitmap_offset >= needed)
+            if (info->bitmap_offset >= needed) {
                 return false;
+            }
 
             const u8* bmp = buffer.data() + info->bitmap_offset;
             const size_t size = static_cast<size_t>(needed) - info->bitmap_offset;
         #else
             const int fd = open("/sys/firmware/acpi/bgrt/image", O_RDONLY);
-            if (fd < 0)
-            {
+            if (fd < 0) {
                 debug("BOOT_LOGO: failed to open /sys/firmware/acpi/bgrt/image");
                 return false;
             }
 
             const off_t size = lseek(fd, 0, SEEK_END);
-            if (size <= 0)
-            {
+            if (size <= 0) {
                 debug("BOOT_LOGO: failed to seek to the end");
                 close(fd);
                 return false;
@@ -9565,14 +9840,17 @@ public:
             size_t off = 0;
             for (;;) {
                 read_size = read(fd, buffer.data() + off, size - off);
-                if (read_size <= 0) { break; }
+                if (read_size <= 0) { 
+                    break; 
+                }
                 off += static_cast<size_t>(read_size);
-                if (off >= static_cast<size_t>(size)) { break; }
+                if (off >= static_cast<size_t>(size)) { 
+                    break; 
+                }
             }
 
             close(fd);
-            if (off != static_cast<size_t>(size))
-            {
+            if (off != static_cast<size_t>(size)) {
                 debug("BOOT_LOGO: read failed or partial");
                 return false;
             }
@@ -9615,11 +9893,9 @@ public:
             if (!str || len < 6) {
                 return false;
             }
-
-            if (util::string::to_upper(str[0]) != 'Q') return false;
-            if (util::string::to_upper(str[1]) != 'M') return false;
-
-            return str[2] == '0' && str[3] == '0' && str[4] == '0' && str[5] == '0';
+            return (string::to_lower(str[0]) == 'q' &&
+                string::to_lower(str[1]) == 'm' &&
+                string::starts_with(str + 2, "0000"));
         };
 
         /*
@@ -9628,30 +9904,25 @@ public:
          */
         auto is_vbox_serial = [](const char* str, const size_t len) noexcept -> bool {
             /* Format: VB12345678-12345678 (19 chars) */
-            if (len != 19) {
+            if (len != 19 || !str) {
                 return false;
             }
 
-            if ((str[0] & 0xDF) != 'V' || (str[1] & 0xDF) != 'B') {
+            if (string::to_lower(str[0]) != 'v' || string::to_lower(str[1]) != 'b') {
                 return false;
             }
             if (str[10] != '-') {
                 return false;
             }
 
-            auto is_hex = [](const char c) noexcept -> bool {
-                const char lower = static_cast<char>(c | 0x20);
-                return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'f');
-            };
-
             for (size_t i = 2; i < 10; ++i) {
-                if (!is_hex(str[i])) {
+                if (!string::is_hex(str[i])) {
                     return false;
                 }
             }
 
             for (size_t i = 11; i < 19; ++i) {
-                if (!is_hex(str[i])) {
+                if (!string::is_hex(str[i])) {
                     return false;
                 }
             }
@@ -9670,7 +9941,9 @@ public:
 
         auto strnlen = [](const char* s, const size_t max) noexcept -> size_t {
             const void* p = memchr(s, 0, max);
-            if (!p) return max;
+            if (!p) {
+                return max;
+            }
             return static_cast<size_t>(static_cast<const char*>(p) - s);
         };
 
@@ -9679,7 +9952,9 @@ public:
         u8 successful_opens = 0;
 
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return result;
+        if (!ntdll) {
+            return result;
+        }
 
         constexpr const char* function_names[] = {
             "RtlInitUnicodeString",
@@ -9894,10 +10169,7 @@ public:
                     allocated_buffer = reinterpret_cast<BYTE*>(allocation_base);
 
                     /* Retry the query with the larger allocated buffer */
-                    st = nt_device_io_control_file(device, nullptr, nullptr, nullptr, &iosb,
-                        ioctl,
-                        &query, sizeof(query),
-                        allocated_buffer, static_cast<ULONG>(allocated_size));
+                    st = nt_device_io_control_file(device, nullptr, nullptr, nullptr, &iosb, ioctl, &query, sizeof(query), allocated_buffer, static_cast<ULONG>(allocated_size));
                     if (!NT_SUCCESS(st)) {
                         PVOID free_base = reinterpret_cast<PVOID>(allocated_buffer);
                         SIZE_T free_size = 0;
@@ -9997,11 +10269,11 @@ public:
                 continue;
             }
 
-            if (util::string::starts_with(name, "nvme") ||
-                util::string::starts_with(name, "sd") ||
-                util::string::starts_with(name, "sg") ||
-                util::string::starts_with(name, "hd") ||
-                util::string::starts_with(name, "vd")) {
+            if (string::starts_with(name, "nvme") ||
+                string::starts_with(name, "sd") ||
+                string::starts_with(name, "sg") ||
+                string::starts_with(name, "hd") ||
+                string::starts_with(name, "vd")) {
                 const char sys_block_str[] = "/sys/block/";
                 const char device_serial_str[] = "/device/serial";
 
@@ -10126,7 +10398,7 @@ public:
 
         debug("MAC_MEMSIZE: ", "ram size = ", ram);
 
-        if (!util::string::is_numeric(ram)) {
+        if (!string::is_numeric(ram)) {
             debug("MAC_MEMSIZE: ", "found non-digit character, returned false");
             return false;
         }
@@ -10333,8 +10605,7 @@ public:
 
         if (std::unique_ptr<std::string> profiler_res_ptr = util::sys_result("system_profiler SPHardwareDataType")) {
             std::string& output = *profiler_res_ptr;
-
-            util::string::to_lower_inplace(output);
+            string::to_lower_inplace(output);
 
             if (util::find(output, keyword)) {
                 return true;
@@ -10445,19 +10716,18 @@ public:
         constexpr const char* function_names[] = { "NtPowerInformation" }; /* Win8 // Windows Server 2012 */
         void* functions[ARRAYSIZE(function_names)] = {};
         memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
-        if (!functions[0]) return false;
+        if (!functions[0]) {
+            return false;
+        }
 
         using nt_power_information_fn = NTSTATUS(__stdcall*)(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
         const auto nt_power_information = reinterpret_cast<nt_power_information_fn>(functions[0]);
 
         SYSTEM_POWER_CAPABILITIES caps{};
-        const NTSTATUS status = nt_power_information(
-            SystemPowerCapabilities,
-            nullptr, 0,
-            &caps, sizeof(caps)
-        );
-        if (status != 0) return false;
-
+        const NTSTATUS status = nt_power_information(SystemPowerCapabilities, nullptr, 0, &caps, sizeof(caps));
+        if (status != 0) {
+            return false;
+        }
         const bool s0_supported = caps.AoAc;
         const bool s1_supported = caps.SystemS1;
         const bool s2_supported = caps.SystemS2;
@@ -10491,36 +10761,10 @@ public:
 
         /* Some devices like Latitude 5440 and Lenovo 11BES09T00 do not expose thermal control */
         if (util::get_manufacturer_model(&manufacturer, &model)) {
-            auto ci_contains = [](const char* hay, const char* needle) noexcept -> bool {
-                if (!hay || !needle || !*hay || !*needle) return false;
-
-                for (const char* h = hay; *h; ++h) {
-                    const char* a = h;
-                    const char* b = needle;
-
-                    while (*a && *b) {
-                        unsigned char ca = static_cast<unsigned char>(*a);
-                        unsigned char cb = static_cast<unsigned char>(*b);
-
-                        if (ca >= 'A' && ca <= 'Z') ca += 32;
-                        if (cb >= 'A' && cb <= 'Z') cb += 32;
-
-                        if (ca != cb) break;
-                        ++a;
-                        ++b;
-                    }
-
-                    if (!*b)
-                        return true;
-                }
-
-                return false;
-            };
-
-            const bool is_lenovo = ci_contains(manufacturer, "LENOVO");
-            const bool is_dell = ci_contains(manufacturer, "Dell Inc.");
-            const bool is_qiyida = ci_contains(manufacturer, "QIYIDA");
-            const bool is_latitude = ci_contains(model, "Latitude");
+            const bool is_lenovo = string::contains_ci(manufacturer, "LENOVO");
+            const bool is_dell = string::contains_ci(manufacturer, "Dell Inc.");
+            const bool is_qiyida = string::contains_ci(manufacturer, "QIYIDA");
+            const bool is_latitude = string::contains_ci(model, "Latitude");
 
             if (is_lenovo || is_qiyida || (is_dell && is_latitude)) {
                 debug("Lenovo, Qiyida or Dell device detected, aborting thermal control check");
@@ -10539,7 +10783,9 @@ public:
      */
     [[nodiscard]] static bool gamarue() {
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "NtOpenKey", "NtQueryValueKey", "RtlInitUnicodeString", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -10550,8 +10796,9 @@ public:
         const auto rtl_init_unicode_string = reinterpret_cast<void(__stdcall*)(PUNICODE_STRING, PCWSTR)>(functions[2]);
         const auto nt_close = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE)>(functions[3]);
 
-        if (!nt_open_key || !nt_query_value_key || !rtl_init_unicode_string || !nt_close) 
+        if (!nt_open_key || !nt_query_value_key || !rtl_init_unicode_string || !nt_close) {
             return false;
+        }
 
         UNICODE_STRING key_name;
         rtl_init_unicode_string(&key_name, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion");
@@ -10583,7 +10830,6 @@ public:
         constexpr ULONG key_value_partial_information = 2;
 
         st = nt_query_value_key(key, &value_name, key_value_partial_information, buffer, sizeof(buffer), &result_length);
-
         nt_close(key);
 
         if (!NT_SUCCESS(st)) {
@@ -10639,7 +10885,9 @@ public:
         };
 
         constexpr size_t target_length = 21;
-        if (strlen(product_id) != target_length) return false;
+        if (strlen(product_id) != target_length) {
+            return false;
+        }
 
         /*
          * Compare the current system's ProductId against the blacklist
@@ -10760,7 +11008,9 @@ public:
      */
     [[nodiscard]] static bool mutex() {
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "NtOpenMutant", "RtlInitUnicodeString", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -10781,7 +11031,6 @@ public:
         auto try_mutex_name = [&](const wchar_t* base_name) noexcept -> bool {
             constexpr wchar_t prefix[] = L"\\BaseNamedObjects\\";
             constexpr size_t prefix_len = (sizeof(prefix) / sizeof(wchar_t)) - 1;
-
             wchar_t full_path[260];
 
             /* Memcpy as it is faster than wcscpy/wcscat */
@@ -10846,7 +11095,9 @@ public:
      */
     [[nodiscard]] static bool cuckoo() {
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "NtOpenFile", "RtlInitUnicodeString", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -10924,14 +11175,14 @@ public:
      */
     [[nodiscard]] static bool display() {
         const HDC hdc = GetDC(nullptr);
-        const int bpp = GetDeviceCaps(hdc, BITSPIXEL) *
-            GetDeviceCaps(hdc, PLANES);
+        const int bpp = GetDeviceCaps(hdc, BITSPIXEL) * GetDeviceCaps(hdc, PLANES);
         const int logpix = GetDeviceCaps(hdc, LOGPIXELSX);
         ReleaseDC(nullptr, hdc);
 
         /* Physical monitors are almost always 32bpp and 96–144 DPI */
-        if (bpp != 32 || logpix < 90)
+        if (bpp != 32 || logpix < 90) {
             return true;
+        }
 
         return false;
     }
@@ -10995,7 +11246,9 @@ public:
 
         constexpr ULONG system_module_information = 11;
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = {
             "NtQuerySystemInformation",
@@ -11029,12 +11282,15 @@ public:
         const auto nt_close = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE)>(functions[6]);
 
         if (nt_query_system_information == nullptr || nt_allocate_virtual_memory == nullptr || nt_free_virtual_memory == nullptr ||
-            rtl_init_unicode_string == nullptr || nt_open_key == nullptr || nt_query_key == nullptr || nt_close == nullptr)
+            rtl_init_unicode_string == nullptr || nt_open_key == nullptr || nt_query_key == nullptr || nt_close == nullptr) { 
             return false;
+        }
 
         ULONG ul_size = 0;
         NTSTATUS status = nt_query_system_information(system_module_information, nullptr, 0, &ul_size);
-        if (status != ((NTSTATUS)0xC0000004L)) return false;
+        if (status != ((NTSTATUS)0xC0000004L)) {
+            return false;
+        }
 
         const HANDLE current_process = reinterpret_cast<HANDLE>(-1LL);
         PVOID allocated_memory = nullptr;
@@ -11189,7 +11445,9 @@ public:
      */
     [[nodiscard]] static bool device_handles() {
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "RtlInitUnicodeString", "NtOpenFile", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -11303,8 +11561,7 @@ public:
         const u32 max_virtual_processors = static_cast<u32>(regs[0]);
         const u32 max_logical_processors = static_cast<u32>(regs[1]);
 
-        debug("VIRTUAL_PROCESSORS: MaxVirtualProcessors -> ", max_virtual_processors,
-            ", MaxLogicalProcessors -> ", max_logical_processors);
+        debug("VIRTUAL_PROCESSORS: MaxVirtualProcessors -> ", max_virtual_processors, ", MaxLogicalProcessors -> ", max_logical_processors);
 
         if (max_virtual_processors == 0xFFFFFFFF || max_logical_processors == 0) {
             return true;
@@ -11344,8 +11601,10 @@ public:
         };
 
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
-    
+        if (!ntdll) {
+            return false;
+        }
+
         constexpr const char* function_names[] = { "NtOpenKey", "NtQueryObject", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
         memory::get_function(ntdll, function_names, functions, ARRAYSIZE(function_names));
@@ -11358,9 +11617,10 @@ public:
         const auto nt_query_object = reinterpret_cast<nt_query_object_fn>(functions[1]);
         const auto nt_close = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE)>(functions[2]);
 
-        if (!nt_open_key || !nt_query_object || !nt_close)
+        if (!nt_open_key || !nt_query_object || !nt_close) {
             return false;
-    
+        }
+
         /* Prepare to open the root USER registry hive */
         UNICODE_STRING key_path{};
         key_path.Buffer = const_cast<PWSTR>(L"\\REGISTRY\\USER");
@@ -11382,8 +11642,9 @@ public:
          */
         HANDLE key = nullptr;
         NTSTATUS status = nt_open_key(&key, KEY_READ, reinterpret_cast<POBJECT_ATTRIBUTES>(&object_attributes));
-        if (!(((NTSTATUS)(status)) >= 0))
+        if (!(((NTSTATUS)(status)) >= 0)) {
             return false;
+        }
 
         /*
          * Ask the kernel: "What is the actual name of the object this handle points to?"
@@ -11395,9 +11656,10 @@ public:
         ULONG returned_length = 0;
         status = nt_query_object(key, ObjectNameInformation, buffer, sizeof(buffer), &returned_length);
         nt_close(key);
-        if (!(((NTSTATUS)(status)) >= 0))
-            return false;
 
+        if (!(((NTSTATUS)(status)) >= 0)) {
+            return false;
+        }
         const auto object_name = reinterpret_cast<POBJECT_NAME_INFORMATION>(buffer);
 
         UNICODE_STRING expected_name{};
@@ -11408,7 +11670,8 @@ public:
          * Compare the requested name vs the actual kernel object name
          * If they don't match, we have been redirected, confirming the presence of Sandboxie
          */
-        const bool mismatch = (object_name->Name.Length != expected_name.Length) ||
+        const bool mismatch = 
+            (object_name->Name.Length != expected_name.Length) ||
             (object_name->Name.Buffer == nullptr) ||
             (memcmp(object_name->Name.Buffer, expected_name.Buffer, expected_name.Length) != 0);
 
@@ -11452,7 +11715,9 @@ public:
         };
 
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "RtlInitUnicodeString", "NtOpenKey", "NtQueryKey", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -11564,7 +11829,9 @@ public:
         };
 
         auto has_excluded_token = [&](const wchar_t* s) noexcept -> bool {
-            if (!s || !*s) return false;
+            if (!s || !*s) {
+                return false;
+            }
             for (const wchar_t* tok : excluded_tokens) {
                 if (wcsstr(s, tok) != nullptr) 
                     return true;
@@ -11628,7 +11895,9 @@ public:
             };
 
             for (const wchar_t* p = ptr; p < buf_end && *p; p += (wcslen(p) + 1)) {
-                if (has_excluded_token(p)) continue;
+                if (has_excluded_token(p)) {
+                    continue;
+                }
 
                 for (const wchar_t* sig : vm_signatures) {
                     if (wcsstr(p, sig) != nullptr) {
@@ -11678,7 +11947,9 @@ public:
         }
 
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = {
             "NtGetContextThread",
@@ -11977,7 +12248,9 @@ public:
 
         const HANDLE current_thread = reinterpret_cast<HANDLE>(-2LL);
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "NtGetContextThread", "NtSetContextThread" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -12140,7 +12413,9 @@ public:
         NTSTATUS status;
 
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "NtOpenDirectoryObject", "NtQueryDirectoryObject", "NtClose" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -12150,7 +12425,9 @@ public:
         const auto nt_query_directory_object = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE, PVOID, ULONG, BOOLEAN, BOOLEAN, PULONG, PULONG)>(functions[1]);
         const auto nt_close = reinterpret_cast<NTSTATUS(__stdcall*)(HANDLE)>(functions[2]);
 
-        if (!nt_open_directory_object || !nt_query_directory_object || !nt_close) return false;
+        if (!nt_open_directory_object || !nt_query_directory_object || !nt_close) {
+            return false;
+        }
 
         /*
          * Prepare to open the root "\Device" directory in the Object Manager namespace
@@ -12285,7 +12562,9 @@ public:
 
                 size_t realChars = 0;
                 for (; realChars < max_chars; ++realChars) {
-                    if (alt_ptr[realChars] == L'\0') break;
+                    if (alt_ptr[realChars] == L'\0') {
+                        break;
+                    }
                 }
                 if (realChars == max_chars) {
                     nt_close(dir);
@@ -12325,7 +12604,9 @@ public:
      * @implements VM::NVRAM
      */
     static bool nvram() {
-        if (!util::is_admin()) return false;
+        if (!util::is_admin()) {
+            return false;
+        }
 
         struct VARIABLE_NAME { ULONG NextEntryOffset; GUID VendorGuid; WCHAR Name[1]; };
         using variable_name_ptr = VARIABLE_NAME*;
@@ -12359,14 +12640,24 @@ public:
          * -------------------------------------------------------------------------
          */
         auto buffer_contains_ascii_ci = [](const BYTE* data, size_t len, const char* pat) noexcept -> bool {
-            if (!data || len == 0 || !pat) return false;
-            const size_t plen = strlen(pat); if (len < plen) return false;
+            if (!data || len == 0 || !pat) {
+                return false;
+            }
+
+            const size_t plen = strlen(pat); 
+            if (len < plen) {
+                return false;
+            }
+
             const BYTE p0 = static_cast<BYTE>((pat[0] >= 'A' && pat[0] <= 'Z') ? (pat[0] + 32) : pat[0]);
             const BYTE* end = data + (len - plen);
             for (const BYTE* p = data; p <= end; ++p) {
                 BYTE c0 = *p;
                 c0 = static_cast<BYTE>((c0 >= 'A' && c0 <= 'Z') ? (c0 + 32) : c0);
-                if (c0 != p0) continue;
+                if (c0 != p0) {
+                    continue;
+                }
+
                 bool ok = true;
                 for (size_t j = 1; j < plen; ++j) {
                     BYTE dj = p[j];
@@ -12377,20 +12668,34 @@ public:
                         break;
                     }
                 }
-                if (ok) return true;
+
+                if (ok) {
+                    return true;
+                }
             }
+
             return false;
         };
 
         auto buffer_contains_utf16le_ci = [](const WCHAR* data, size_t wlen, const wchar_t* pat) noexcept -> bool {
-            if (!data || wlen == 0 || !pat) return false;
-            const size_t plen = wcslen(pat); if (wlen < plen) return false;
+            if (!data || wlen == 0 || !pat) {
+                return false;
+            }
+
+            const size_t plen = wcslen(pat); 
+            if (wlen < plen) {
+                return false;
+            }
+
             const WCHAR p0 = static_cast<WCHAR>((pat[0] >= L'A' && pat[0] <= L'Z') ? (pat[0] + 32) : pat[0]);
             const WCHAR* end = data + (wlen - plen);
             for (const WCHAR* p = data; p <= end; ++p) {
                 WCHAR c0 = *p; 
                 c0 = static_cast<WCHAR>((c0 >= L'A' && c0 <= L'Z') ? (c0 + 32) : c0);
-                if (c0 != p0) continue;
+                if (c0 != p0) {
+                    continue;
+                }
+
                 bool ok = true;
                 for (size_t j = 1; j < plen; ++j) {
                     WCHAR dj = p[j]; 
@@ -12401,8 +12706,11 @@ public:
                         break;  
                     }
                 }
-                if (ok) return true;
+                if (ok) {
+                    return true;
+                }
             }
+
             return false;
         };
 
@@ -12414,11 +12722,15 @@ public:
 
             ULONG required_size = 0;
             (void)nt_query_value(&uni_str, &guid, nullptr, &required_size, nullptr);
-            if (required_size == 0) return false;
+            if (required_size == 0) {
+                return false;
+            }
 
             PVOID allocation_base = nullptr;
             SIZE_T alloc_size = required_size;
-            if (alloc_size < 0x1000) alloc_size = 0x1000;
+            if (alloc_size < 0x1000) {
+                alloc_size = 0x1000;
+            }
 
             NTSTATUS status = nt_allocate_memory(current_process_handle, &allocation_base, 0, &alloc_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
             if (status != 0 || !allocation_base) {
@@ -12456,8 +12768,12 @@ public:
          * -------------------------------------------------------------------------
          */
         do {
-            if (!OpenProcessToken(current_process_handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token_handle)) break;
-            if (!LookupPrivilegeValue(nullptr, SE_SYSTEM_ENVIRONMENT_NAME, &luid_struct)) break;
+            if (!OpenProcessToken(current_process_handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token_handle)) {
+                break;
+            }
+            if (!LookupPrivilegeValue(nullptr, SE_SYSTEM_ENVIRONMENT_NAME, &luid_struct)) {
+                break;
+            }
 
             TOKEN_PRIVILEGES tp_enable{};
             tp_enable.PrivilegeCount = 1;
@@ -12465,15 +12781,18 @@ public:
             tp_enable.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
             previous_privileges_size = sizeof(previous_privileges);
-            if (!AdjustTokenPrivileges(token_handle, FALSE, &tp_enable, previous_privileges_size, &previous_privileges, &previous_privileges_size))
+            if (!AdjustTokenPrivileges(token_handle, FALSE, &tp_enable, previous_privileges_size, &previous_privileges, &previous_privileges_size)) {            
                 break;
-            if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
-                break;       
-
+            }
+            if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
+                break;
+            }
             privilege_state_saved = true;
 
             const HMODULE ntdll = memory::get_module(true);
-            if (!ntdll) break;
+            if (!ntdll) {
+                break;
+            }
 
             constexpr const char* function_names[] = { "NtEnumerateSystemEnvironmentValuesEx", "NtAllocateVirtualMemory", "NtFreeVirtualMemory", "NtQuerySystemEnvironmentValueEx" };
             void* functions[ARRAYSIZE(function_names)] = {};
@@ -12484,7 +12803,9 @@ public:
             nt_free_memory = reinterpret_cast<nt_free_virtual_memory_fn>(functions[2]);
             nt_query_value = reinterpret_cast<nt_query_system_environment_value_ex_fn>(functions[3]);
 
-            if (!nt_enumerate_values || !nt_allocate_memory || !nt_free_memory || !nt_query_value) break;
+            if (!nt_enumerate_values || !nt_allocate_memory || !nt_free_memory || !nt_query_value) {
+                break;
+            }
 
             NTSTATUS alloc_status = 0;
             ULONG buffer_required_length = 0;
@@ -12534,13 +12855,19 @@ public:
                 const uintptr_t base_address = reinterpret_cast<uintptr_t>(enum_base_buffer);
                 const uintptr_t current_address = reinterpret_cast<uintptr_t>(current_var);
 
-                if (current_address < base_address) break;
+                if (current_address < base_address) {
+                    break;
+                }
 
                 const size_t current_offset = static_cast<size_t>(current_address - base_address);
-                if (current_offset >= buffer_total_size) break;
+                if (current_offset >= buffer_total_size) {
+                    break;
+                }
 
                 const size_t name_struct_offset = offsetof(VARIABLE_NAME, Name);
-                if (buffer_total_size - current_offset < name_struct_offset) break;
+                if (buffer_total_size - current_offset < name_struct_offset) {
+                    break;
+                }
 
                 size_t name_max_bytes = 0;
                 if (current_var->NextEntryOffset != 0) {
@@ -12549,7 +12876,10 @@ public:
                         should_break_loop = true; 
                         break;
                     }
-                    if (next_entry > buffer_total_size - current_offset) break;
+                    if (next_entry > buffer_total_size - current_offset) {
+                        break;
+                    }
+
                     name_max_bytes = next_entry - name_struct_offset;
                 }
                 else {
@@ -12557,22 +12887,28 @@ public:
                         should_break_loop = true;
                         break; 
                     }
+
                     name_max_bytes = buffer_total_size - (current_offset + name_struct_offset);
                 }
 
-                if (name_max_bytes > MAX_NAME_BYTE_LIMIT) name_max_bytes = MAX_NAME_BYTE_LIMIT;
+                if (name_max_bytes > MAX_NAME_BYTE_LIMIT) {
+                    name_max_bytes = MAX_NAME_BYTE_LIMIT;
+                }
 
                 std::wstring var_name_view;
                 if (name_max_bytes >= sizeof(WCHAR)) {
                     const WCHAR* name_ptr = reinterpret_cast<const WCHAR*>(reinterpret_cast<const BYTE*>(current_var) + name_struct_offset);
                     const size_t max_chars = name_max_bytes / sizeof(WCHAR);
                     size_t real_chars = 0;
-                    while (real_chars < max_chars && name_ptr[real_chars] != L'\0') 
+                    while (real_chars < max_chars && name_ptr[real_chars] != L'\0') {             
                         ++real_chars;
+                    }
+
                     if (real_chars == max_chars) { 
                         should_break_loop = true;
                         break; 
                     }
+
                     var_name_view = std::wstring(name_ptr, real_chars);
                 }
 
@@ -12584,17 +12920,26 @@ public:
                 }
 
                 /* Read variables */
-                if (var_name_view == L"PKDefault" && pk_default_buf == nullptr)
+                if (var_name_view == L"PKDefault" && pk_default_buf == nullptr) {
                     (void)read_variable_to_buffer(std::wstring(var_name_view), current_var->VendorGuid, pk_default_buf, pk_default_len);
+                }
 
-                if (current_var->NextEntryOffset == 0) break;
+                if (current_var->NextEntryOffset == 0) {
+                    break;
+                }
+
                 const SIZE_T next_entry_off = static_cast<SIZE_T>(current_var->NextEntryOffset);
                 const size_t next_var_offset = current_offset + next_entry_off;
-                if (next_var_offset <= current_offset || next_var_offset > buffer_total_size) break;
+                if (next_var_offset <= current_offset || next_var_offset > buffer_total_size) {
+                    break;
+                }
+
                 current_var = reinterpret_cast<variable_name_ptr>(reinterpret_cast<PBYTE>(enum_base_buffer) + next_var_offset);
             }
 
-            if (should_break_loop) break;
+            if (should_break_loop) {
+                break;
+            }
 
             /* Free enumeration buffer */
             SIZE_T z = 0;
@@ -12607,12 +12952,15 @@ public:
                 if ((pk_default_len >= 2) && ((pk_default_len % 2) == 0)) {
                     const WCHAR* wptr = reinterpret_cast<const WCHAR*>(pk_default_buf);
                     const size_t wlen = pk_default_len / sizeof(WCHAR);
-                    if (buffer_contains_utf16le_ci(wptr, wlen, redhat_sig_wide))
+                    if (buffer_contains_utf16le_ci(wptr, wlen, redhat_sig_wide)) {
                         found_redhat = true;
+                    }
                 }
-                if (!found_redhat)
-                    if (buffer_contains_ascii_ci(pk_default_buf, pk_default_len, redhat_sig_ascii))
+                if (!found_redhat) {
+                    if (buffer_contains_ascii_ci(pk_default_buf, pk_default_len, redhat_sig_ascii)) {
                         found_redhat = true;
+                    }
+                }
             }
             if (found_redhat) {
                 debug("NVRAM: QEMU/OVMF certificates detected");
@@ -12625,9 +12973,10 @@ public:
         cleanup(pk_default_buf);
         cleanup(enum_base_buffer);
 
-        if (privilege_state_saved && token_handle)
+        if (privilege_state_saved && token_handle) {
             AdjustTokenPrivileges(token_handle, FALSE, &previous_privileges, previous_privileges_size, nullptr, nullptr);
-        
+        }
+
         if (token_handle) {
             CloseHandle(token_handle);
             token_handle = nullptr;
@@ -12740,13 +13089,17 @@ public:
         /* Probe AVX */
         auto is_avx_spoofed = [&]() TARGET_AVX noexcept -> bool {
             /* If hardware doesn't advertise AVX, we cannot test it in user-mode */
-            if (!avx_adv) return false;
+            if (!avx_adv) {
+                return false;
+            }
 
             /*
              * If the OS has not enabled XSAVE/XRSTOR, AVX cannot run
              * This is normal bare-metal OS behavior (e.g. legacy/minimal bootloader environments)
              */
-            if (!osxsave_adv) return false;
+            if (!osxsave_adv) {
+                return false;
+            }
 
             alignas(32) float in0[8] = { 1,2,3,4,5,6,7,8 };
             alignas(32) float in1[8] = { 16,15,14,13,12,11,10,9 };
@@ -12759,7 +13112,9 @@ public:
                  * If the OS has not enabled AVX state tracking in XCR0, AVX cannot execute
                  * If a hypervisor misconfigures this, the xgetbv instruction itself will #UD here
                  */
-                if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) return false;
+                if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) {
+                    return false;
+                }
 
                 const __m256 va = _mm256_loadu_ps(in0);
                 const __m256 vb = _mm256_loadu_ps(in1);
@@ -12782,8 +13137,12 @@ public:
 
         /* Probe AVX2 */
         auto is_avx2_spoofed = [&]() TARGET_AVX2 noexcept -> bool{
-            if (!avx2_adv) return false;
-            if (!avx_adv || !osxsave_adv) return false;
+            if (!avx2_adv) {
+                return false;
+            }
+            if (!avx_adv || !osxsave_adv) {
+                return false;
+            }
 
             alignas(32) u32 in0[8] = { 1,2,3,4,5,6,7,8 };
             alignas(32) u32 in1[8] = { 16,15,14,13,12,11,10,9 };
@@ -12791,7 +13150,9 @@ public:
 
             __try {
                 const u64 xcr0 = static_cast<u64>(_xgetbv(0));
-                if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) return false;
+                if ((xcr0 & XCR0_AVX_MASK) != XCR0_AVX_MASK) {
+                    return false;
+                }
 
                 const __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in0));
                 const __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(in1));
@@ -12810,8 +13171,12 @@ public:
 
         /* Probe AVX512 */
         auto is_avx512_spoofed = [&]() TARGET_AVX512 noexcept -> bool{
-            if (!avx512_adv) return false;
-            if (!avx_adv || !osxsave_adv) return false;
+            if (!avx512_adv) {
+                return false;
+            }
+            if (!avx_adv || !osxsave_adv) {
+                return false;
+            }
 
             alignas(64) u32 in0[16] = {
                 1,2,3,4,5,6,7,8, 9,10,11,12,13,14,15,16
@@ -12828,7 +13193,9 @@ public:
                  * If the OS disabled AVX-512 state tracking (e.g. kernel flags or hybrid cores)
                  * we return false. Running AVX-512 would legitimately #UD here
                  */
-                if ((xcr0 & XCR0_AVX512_MASK) != XCR0_AVX512_MASK) return false;
+                if ((xcr0 & XCR0_AVX512_MASK) != XCR0_AVX512_MASK) {
+                    return false;
+                }
 
                 const __m512i va = _mm512_loadu_si512(reinterpret_cast<const void*>(in0));
                 const __m512i vb = _mm512_loadu_si512(reinterpret_cast<const void*>(in1));
@@ -12981,13 +13348,16 @@ public:
             }
         }
 
-        if (claimed_intel || !claimed_amd) exception = true; /* should generate an exception rather than be treated as a NOP, but we will check its side effects anyways */
+        if (claimed_intel || !claimed_amd) {
+            exception = true; /* should generate an exception rather than be treated as a NOP, but we will check its side effects anyways */
+        }
 
         /* One cache line = 64 bytes */
         const SIZE_T target_size = 64;
-
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = { "NtAllocateVirtualMemory", "NtProtectVirtualMemory", "NtFlushInstructionCache", "NtFreeVirtualMemory" };
         void* functions[ARRAYSIZE(function_names)] = {};
@@ -13115,7 +13485,9 @@ public:
             amd_target_mem = nullptr;
         }
 
-        if (spoofed) return spoofed;
+        if (spoofed) {
+            return spoofed;
+        }
 
         /*
          * Ok so if the CPU is intel, the motherboard should be intel aswell (and same with AMD)
@@ -13135,7 +13507,10 @@ public:
             };
 
             auto contains_token = [](const wchar_t* haystack) noexcept -> bool {
-                if (!haystack) return false;
+                if (!haystack) {
+                    return false;
+                }
+
                 for (const wchar_t* const* t = TOKENS; *t; ++t) {
                     const wchar_t* needle = *t;
                     const wchar_t* h = haystack;
@@ -13147,22 +13522,32 @@ public:
 
                         while (*n_iter) {
                             wchar_t hc = *h_iter;
-                            if (hc >= L'A' && hc <= L'Z') hc += 32;
+                            if (hc >= L'A' && hc <= L'Z') {
+                                hc += 32;
+                            }
+                            if (hc != *n_iter) {
+                                break;
+                            }
 
-                            if (hc != *n_iter) break;
                             h_iter++;
                             n_iter++;
                         }
 
-                        if (!*n_iter) return true; 
+                        if (!*n_iter) {
+                            return true;
+                        }
                         h++;
                     }
                 }
+
                 return false;
             };
 
             auto find_vendor_hex = [](const wchar_t* wptr) noexcept -> u32 {
-                if (!wptr) return 0;
+                if (!wptr) {
+                    return 0;
+                }
+
                 const wchar_t* p = wptr;
                 while (*p) {
                     /* Check for "VEN_" (case-insensitive) */
@@ -13175,24 +13560,32 @@ public:
                             const wchar_t* q = p + 4;
                             u32 val = 0;
                             int got = 0;
+
                             while (got < 4 && *q) {
                                 const wchar_t c = *q;
                                 u32 nib = 0;
-                                if (c >= L'0' && c <= L'9')
+                                if (c >= L'0' && c <= L'9') {
                                     nib = static_cast<u32>(c - L'0');
-                                else if ((c | 0x20) >= L'a' && (c | 0x20) <= L'f')
+                                }
+                                else if ((c | 0x20) >= L'a' && (c | 0x20) <= L'f') {
                                     nib = static_cast<u32>((c | 0x20) - L'a' + 10);
-                                else
+                                }
+                                else {
                                     break;
+                                }
 
                                 val = (val << 4) | nib;
                                 ++got; ++q;
                             }
-                            if (got == 4) return val;
+
+                            if (got == 4) {
+                                return val;
+                            }
                         }
                     }
                     ++p;
                 }
+
                 return 0;
             };
 
@@ -13207,13 +13600,14 @@ public:
 
             auto scan_devices = [&](const GUID* classGuid, DWORD flags) noexcept {
                 HDEVINFO handle_dev_info = SetupDiGetClassDevsW(classGuid, nullptr, nullptr, flags);
-                if (handle_dev_info == INVALID_HANDLE_VALUE) return;
+                if (handle_dev_info == INVALID_HANDLE_VALUE) {
+                    return;
+                }
 
                 SP_DEVINFO_DATA dev_info_data{};
                 dev_info_data.cbSize = sizeof(SP_DEVINFO_DATA);
 
                 for (DWORD i = 0; SetupDiEnumDeviceInfo(handle_dev_info, i, &dev_info_data); ++i) {
-
                     const wchar_t* w_desc = nullptr;
                     DWORD req_size = 0;
                     DWORD prop_type = 0;
@@ -13222,7 +13616,9 @@ public:
                         w_desc = stack_buf;
                     }
                     else if (GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
-                        if (heap_buf.size() < req_size) heap_buf.resize(req_size);
+                        if (heap_buf.size() < req_size) {
+                            heap_buf.resize(req_size);
+                        }
                         if (SetupDiGetDeviceRegistryPropertyW(handle_dev_info, &dev_info_data, SPDRP_DEVICEDESC, &prop_type, heap_buf.data(), req_size, nullptr)) {
                             w_desc = reinterpret_cast<const wchar_t*>(heap_buf.data());
                         }
@@ -13230,7 +13626,6 @@ public:
 
                     /* Check if the description contains any interesting stuff */
                     if (w_desc && contains_token(w_desc)) {
-
                         /* If interesting get hwid to get vendor */
                         const wchar_t* w_hardware_id = nullptr;
 
@@ -13246,8 +13641,12 @@ public:
 
                         if (w_hardware_id) {
                             const u32 vid = find_vendor_hex(w_hardware_id);
-                            if (vid == VID_INTEL) intel_hits++;
-                            else if (vid == VID_AMD_ATI || vid == VID_AMD_MICRO) amd_hits++;
+                            if (vid == VID_INTEL) {
+                                intel_hits++;
+                            }
+                            else if (vid == VID_AMD_ATI || vid == VID_AMD_MICRO) {
+                                amd_hits++;
+                            }
                         }
                     }
                 }
@@ -13270,8 +13669,12 @@ public:
             }
 
             /* If no stuff then maybe query all devices in the system with DIGCF_ALLCLASSES | DIGCF_PRESENT? */
-            if (intel_hits > amd_hits) return motherboard_vendor::Intel;
-            if (amd_hits > intel_hits) return motherboard_vendor::AMD;
+            if (intel_hits > amd_hits) {
+                return motherboard_vendor::Intel;
+            }
+            if (amd_hits > intel_hits) {
+                return motherboard_vendor::AMD;
+            }
 
             return motherboard_vendor::Unknown;
         };
@@ -13309,62 +13712,30 @@ public:
      */
     [[nodiscard]] static bool clock() {
     #if (ARM)
-		return false; /* ARM systems do not have the classic x86 timers */
+        return false; /* ARM systems do not have the classic x86 timers */
     #else   
-		if (util::is_x86_process_on_arm()) {
+        if (util::is_x86_process_on_arm()) {
             return false;
         }
 
-        /* Microsoft Surface and Xiaomi models typically do not have PIT, some devices might have it but not expose it due to firmware bugs (i.e. Lenovo 83AG) */
         const char* manufacturer = nullptr;
         const char* model = nullptr;
 
         if (util::get_manufacturer_model(&manufacturer, &model)) {
-            auto ci_contains = [](const char* hay, const char* needle) noexcept -> bool {
-                if (!hay || !needle || !*hay || !*needle) return false;
-
-                for (const char* h = hay; *h; ++h) {
-                    const char* a = h;
-                    const char* b = needle;
-
-                    while (*a && *b) {
-                        unsigned char ca = static_cast<unsigned char>(*a);
-                        unsigned char cb = static_cast<unsigned char>(*b);
-
-                        if (ca >= 'A' && ca <= 'Z') ca += 32;
-                        if (cb >= 'A' && cb <= 'Z') cb += 32;
-
-                        if (ca != cb) break;
-                        ++a;
-                        ++b;
-                    }
-
-                    if (!*b)
-                        return true;
-                }
-
-                return false;
-            };
-
-            const bool is_surface = ci_contains(model, "Surface");
-            const bool is_microsoft = ci_contains(manufacturer, "Microsoft");
-            const bool is_xiaomi = ci_contains(manufacturer, "XIAOMI"); /* REDMI Books do not have PIT */
+            const bool is_surface = string::contains_ci(model, "Surface");
+            const bool is_microsoft = string::contains_ci(manufacturer, "Microsoft");
+            const bool is_xiaomi = string::contains_ci(manufacturer, "XIAOMI");
 
             if ((is_surface && is_microsoft) || is_xiaomi) {
                 debug("Surface or Xiaomi device found, aborting PIT/AT check");
                 return false;
             }
         }
-        
-        /*
-         * The RTC (ACPI/CMOS RTC) timer can't be always detected via SetupAPI, it needs AML decode of the DSDT firmware table
-         * The HPET (PNP0103) timer presence check was removed, more info at: https://github.com/NotRequiem/VMAware/pull/616
-         * Here, we check for the PIT/AT timer (PC-class System Timer)
-         */
-        const HDEVINFO devs = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
 
-        if (devs == INVALID_HANDLE_VALUE)
+        const HDEVINFO devs = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+        if (devs == INVALID_HANDLE_VALUE) {
             return false;
+        }
 
         SP_DEVINFO_DATA dev_info{};
         dev_info.cbSize = sizeof(dev_info);
@@ -13379,17 +13750,17 @@ public:
 
             if (SetupDiGetDeviceRegistryPropertyW(
                 devs, &dev_info, SPDRP_HARDWAREID,
-                &type, nullptr, 0, &needed))
-            {
+                &type, nullptr, 0, &needed)) {
                 continue;
             }
 
-            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || needed == 0) {
                 continue;
+            }
 
-            if (needed > buffer_size) {
-                BYTE* new_buffer = static_cast<BYTE*>(
-                    realloc(buffer, needed + sizeof(wchar_t)));
+            if (needed + sizeof(wchar_t) > buffer_size) {
+                DWORD new_size = needed + sizeof(wchar_t);
+                BYTE* new_buffer = static_cast<BYTE*>(realloc(buffer, new_size));
 
                 if (!new_buffer) {
                     free(buffer);
@@ -13398,33 +13769,35 @@ public:
                 }
 
                 buffer = new_buffer;
-                buffer_size = needed + sizeof(wchar_t);
+                buffer_size = new_size;
             }
 
             if (!SetupDiGetDeviceRegistryPropertyW(
                 devs, &dev_info, SPDRP_HARDWAREID,
-                &type, buffer, buffer_size, &needed))
-            {
+                &type, buffer, buffer_size, &needed)) {
                 continue;
             }
 
-            if (type != REG_MULTI_SZ)
+            if (type != REG_MULTI_SZ) {
                 continue;
+            }
 
             reinterpret_cast<wchar_t*>(buffer)[needed / sizeof(wchar_t)] = L'\0';
 
-            for (const wchar_t* s = reinterpret_cast<const wchar_t*>(buffer); *s;
-                s += wcslen(s) + 1)
-            {
+            const wchar_t* const buffer_start = reinterpret_cast<const wchar_t*>(buffer);
+            const wchar_t* const buffer_end = buffer_start + (needed / sizeof(wchar_t));
+
+            for (const wchar_t* s = buffer_start; s < buffer_end && *s; s += wcslen(s) + 1) {
                 if (_wcsicmp(s, L"ACPI\\PNP0100") == 0 ||
-                    _wcsicmp(s, L"PNP0100") == 0)
-                {
+                    _wcsicmp(s, L"PNP0100") == 0) {
                     found = true;
                     break;
                 }
             }
 
-            if (found) break;
+            if (found) {
+                break;
+            }
         }
 
         free(buffer);
@@ -13634,7 +14007,9 @@ public:
             return false;
         }
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = {
             "NtAllocateVirtualMemory",
@@ -13700,22 +14075,27 @@ public:
 
         using find_double_cc_ntdll_fn = void* (*)(HMODULE);
         find_double_cc_ntdll_fn find_double_cc_ntdll = [](HMODULE module) noexcept -> void* {
-            if (!module) return nullptr;
+            if (!module) {
+                return nullptr;
+            }
 
             /* Parse PE headers to find executable sections */
             auto* dos_header = reinterpret_cast<PIMAGE_DOS_HEADER>(module);
-            if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+            if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
+                return nullptr;
+            }
 
             auto* nt_headers = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<u8*>(module) + dos_header->e_lfanew);
-            if (nt_headers->Signature != IMAGE_NT_SIGNATURE) return nullptr;
+            if (nt_headers->Signature != IMAGE_NT_SIGNATURE) {
+                return nullptr;
+            }
 
             auto* section = IMAGE_FIRST_SECTION(nt_headers);
             for (WORD i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i, ++section) {
-
                 /* Only scan memory marked as executable */
                 if ((section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) {
                     u8* ptr = reinterpret_cast<u8*>(module) + section->VirtualAddress;
-                    size_t size = section->Misc.VirtualSize;
+                    const size_t size = section->Misc.VirtualSize;
 
                     if (size < 2) {
                         continue;
@@ -13753,7 +14133,9 @@ public:
         if (!pointer) {
             void* current_func_ptr = reinterpret_cast<void*>(&hypervisor_hook);
             pointer = find_double_cc(current_func_ptr);
-            if (!pointer) return false;
+            if (!pointer) {
+                return false;
+            }
         }
 
         /* Executing CC natively should throw */
@@ -13771,7 +14153,9 @@ public:
          * so we must reset them on subsequent calls
          */
         NTSTATUS status = nt_protect_virtual_memory(current_process, &base_address, &prot_region_size, PAGE_EXECUTE_READWRITE, &old_protect);
-        if (status < 0) return false;
+        if (status < 0) {
+            return false;
+        }
 
         *static_cast<volatile u8*>(pointer) = 0xC3;
         nt_flush_instruction_cache(current_process, const_cast<void*>(pointer), 1);
@@ -13780,7 +14164,9 @@ public:
         prot_region_size = 1;
         ULONG dummy_protect = 0;
         status = nt_protect_virtual_memory(current_process, &base_address, &prot_region_size, old_protect, &dummy_protect);
-        if (status < 0) return false;
+        if (status < 0) { 
+            return false; 
+        }
 
         bool hook_detected = false;
 
@@ -13790,8 +14176,8 @@ public:
         }
         else {
             volatile LONG did_anyone_throw = 0;
-
             GROUP_AFFINITY active_group_aff{};
+
             if (GetThreadGroupAffinity(current_thread, &active_group_aff)) {
                 for (ULONG i = 0; i < 64; ++i) {
                     if (active_group_aff.Mask & ((ULONG_PTR)1 << i)) {
@@ -14024,7 +14410,9 @@ public:
         static u64 g_saved_rsp = 0;
 
         const HMODULE ntdll = memory::get_module(true);
-        if (!ntdll) return false;
+        if (!ntdll) {
+            return false;
+        }
 
         constexpr const char* function_names[] = {
             "NtAllocateVirtualMemory",
@@ -14094,7 +14482,9 @@ public:
         };
 
         const PVOID handler_ptr = rtl_add_vectored_exception_handler(1, static_cast<PVECTORED_EXCEPTION_HANDLER>(eip_overflow_veh));
-        if (!handler_ptr) return false;
+        if (!handler_ptr) {
+            return false;
+        }
 
         /*
          * Recovery jump target for VEH
@@ -14116,7 +14506,7 @@ public:
         }
 
         /* Align stack pointer */
-        uintptr_t stack32_ptr = reinterpret_cast<uintptr_t>(stack32_base) + 0x10000 - 0x20;
+        const uintptr_t stack32_ptr = reinterpret_cast<uintptr_t>(stack32_base) + 0x10000 - 0x20;
 
         /* High-boundary 32-bit execution target */
         PVOID boundary_base = reinterpret_cast<PVOID>(0xFFFF0000ULL);
@@ -14320,7 +14710,9 @@ public:
 
             auto get_digest_size = [&active_algs](u16 algId) noexcept -> u16 {
                 for (const auto& alg : active_algs) {
-                    if (alg.algId == algId) return alg.digestSize;
+                    if (alg.algId == algId) {
+                        return alg.digestSize;
+                    }
                 }
                 switch (algId) {
                     case 0x0004: return 20; /* SHA-1 */
@@ -14543,11 +14935,15 @@ public:
             u16 get(const u16 alg_id, bool* const found) const noexcept {
                 for (u32 i = 0; i < count; i++) {
                     if (pairs[i].alg_id == alg_id) {
-                        if (found) *found = true;
+                        if (found) {
+                            *found = true;
+                        }
                         return pairs[i].digest_size;
                     }
                 }
-                if (found) *found = false;
+                if (found) {
+                    *found = false;
+                }
                 return 0;
             }
         };
@@ -14726,7 +15122,9 @@ public:
         auto calculate_sha256 = [&](const u8* const VMAWARE_RESTRICT data, const u32 size, u8* const VMAWARE_RESTRICT out_digest) noexcept -> bool {
             BCRYPT_HASH_HANDLE h_hash = nullptr;
             NTSTATUS status = p_bcrypt_create_hash(h_bcrypt_alg, &h_hash, hash_object_buffer, cb_hash_object, nullptr, 0, 0);
-            if (status != 0) return false;
+            if (status != 0) {
+                return false;
+            }
 
             status = p_bcrypt_hash_data(h_hash, const_cast<PUCHAR>(data), size, 0);
             if (status == 0) {
@@ -14760,45 +15158,69 @@ public:
             u32 resp_size = sizeof(resp);
 
             const TBS_RESULT hr = p_tbsip_submit_command(h_context, 0, 200, cmd, sizeof(cmd), resp, &resp_size);
-            if (hr != 0) return false;
+            if (hr != 0) {
+                return false;
+            }
 
-            if (resp_size < 10) return false;
-            const u32 code = (static_cast<u32>(resp[6]) << 24) |
+            if (resp_size < 10) {
+                return false;
+            }
+            const u32 code = 
+                (static_cast<u32>(resp[6]) << 24) |
                 (static_cast<u32>(resp[7]) << 16) |
                 (static_cast<u32>(resp[8]) << 8) |
                 resp[9];
-            if (code != 0) return false;
+
+            if (code != 0) {
+                return false;
+            }
 
             u32 offset = 14;
 
-            if (offset + 4 > resp_size) return false;
-            const u32 sel_count = (static_cast<u32>(resp[offset]) << 24) |
+            if (offset + 4 > resp_size) {
+                return false;
+            }
+            const u32 sel_count = 
+                (static_cast<u32>(resp[offset]) << 24) |
                 (static_cast<u32>(resp[offset + 1]) << 16) |
                 (static_cast<u32>(resp[offset + 2]) << 8) |
                 resp[offset + 3];
 
             offset += 4;
-            if (sel_count != 1) return false;
+            if (sel_count != 1) {
+                return false;
+            }
 
             offset += 2;
-            if (offset + 1 > resp_size) return false;
+            if (offset + 1 > resp_size) {
+                return false;
+            }
             const u8 ret_sizeof_select = resp[offset];
             offset += 1 + ret_sizeof_select;
 
-            if (offset + 4 > resp_size) return false;
-            const u32 digest_count = (static_cast<u32>(resp[offset]) << 24) |
+            if (offset + 4 > resp_size) { 
+                return false;
+            }
+            const u32 digest_count = 
+                (static_cast<u32>(resp[offset]) << 24) |
                 (static_cast<u32>(resp[offset + 1]) << 16) |
                 (static_cast<u32>(resp[offset + 2]) << 8) |
                 resp[offset + 3];
 
             offset += 4;
-            if (digest_count != 1) return false;
+            if (digest_count != 1) {
+                return false;
+            }
 
-            if (offset + 2 > resp_size) return false;
+            if (offset + 2 > resp_size) { 
+                return false;
+            }
             const u16 digest_size = static_cast<u16>((resp[offset] << 8) | resp[offset + 1]);
             offset += 2;
 
-            if (offset + digest_size > resp_size) return false;
+            if (offset + digest_size > resp_size) {
+                return false;
+            }
 
             if (out_digest) {
                 memcpy(out_digest, resp + offset, digest_size > 32 ? 32 : digest_size);
@@ -14845,19 +15267,27 @@ public:
                     return true;
                 }
             }
+
             return false;
         };
 
         auto has_id = [](const u16* list, u32 count, u16 id) noexcept -> bool {
             for (u32 i = 0; i < count; ++i) {
-                if (list[i] == id) return true;
+                if (list[i] == id) {
+                    return true;
+                }
             }
+
             return false;
         };
 
         auto add_id = [&](u16* list, u32& count, u16 id) noexcept -> bool {
-            if (has_id(list, count, id)) return true;
-            if (count >= 64) return false;
+            if (has_id(list, count, id)) {
+                return true;
+            }
+            if (count >= 64) {
+                return false;
+            }
             list[count++] = id;
             return true;
         };
@@ -14871,7 +15301,7 @@ public:
         std::string t;
 
         while (std::getline(ss, t, ',')) {
-            util::string::trim_inplace(t);
+            string::trim_inplace(t);
             if (t.empty() || t.find('=') != std::string::npos) {
                 continue;
             }
@@ -14893,10 +15323,7 @@ public:
         };
 
         auto be32 = [](const u8* p) -> u32 {
-            return (static_cast<u32>(p[0]) << 24) |
-                (static_cast<u32>(p[1]) << 16) |
-                (static_cast<u32>(p[2]) << 8) |
-                static_cast<u32>(p[3]);
+            return (static_cast<u32>(p[0]) << 24) | (static_cast<u32>(p[1]) << 16) | (static_cast<u32>(p[2]) << 8) | static_cast<u32>(p[3]);
         };
 
         u8 cmd_alg[22] = {
@@ -14968,35 +15395,9 @@ public:
         const char* model = nullptr;
 
         if (util::get_manufacturer_model(&manufacturer, &model)) {
-            auto ci_contains = [](const char* hay, const char* needle) noexcept -> bool {
-                if (!hay || !needle || !*hay || !*needle) return false;
-
-                for (const char* h = hay; *h; ++h) {
-                    const char* a = h;
-                    const char* b = needle;
-
-                    while (*a && *b) {
-                        unsigned char ca = static_cast<unsigned char>(*a);
-                        unsigned char cb = static_cast<unsigned char>(*b);
-
-                        if (ca >= 'A' && ca <= 'Z') ca += 32;
-                        if (cb >= 'A' && cb <= 'Z') cb += 32;
-
-                        if (ca != cb) break;
-                        ++a;
-                        ++b;
-                    }
-
-                    if (!*b)
-                        return true;
-                }
-
-                return false;
-            };
-
-            const bool is_lenovo = ci_contains(manufacturer, "LENOVO");
-            const bool is_hp = ci_contains(manufacturer, "HP") || ci_contains(manufacturer, "Hewlett-Packard");
-            const bool is_acer = ci_contains(manufacturer, "Acer");
+            const bool is_lenovo = string::contains_ci(manufacturer, "LENOVO");
+            const bool is_hp = string::contains_ci(manufacturer, "HP") || string::contains_ci(manufacturer, "Hewlett-Packard");
+            const bool is_acer = string::contains_ci(manufacturer, "Acer");
 
             if (is_lenovo || is_hp || is_acer) {
                 debug("TPM: Recognized OEM manufacturer which normally manufactures buggy firmware, skipping PCR mismatch check.");
@@ -15145,6 +15546,7 @@ public:
                 free_resources();
                 return false;
             }
+
             const u32 event_size = read_u32(log_buffer + offset);
             offset += 4;
 
@@ -15318,6 +15720,7 @@ public:
                 }
                 return m;
             }();
+
             return mask;
         }
 
@@ -15330,6 +15733,7 @@ public:
                 }
                 return m;
             }();
+
             return mask;
         }
 
@@ -15429,7 +15833,6 @@ public:
             /* For custom VM techniques, won't be used most of the time */
             if (VMAWARE_UNLIKELY(!core::custom_table.empty())) {
                 for (const auto& technique : core::custom_table) {
-
                     /* If cached, return that result */
                     if (memo::is_cached(technique.id)) {
                         const memo::data_t data = memo::cache_fetch(technique.id);
@@ -15484,8 +15887,7 @@ public:
             }
 
             constexpr bool is_set(const enum_flags flag) const noexcept {
-                return static_cast<size_t>(flag) < flag_collector.size() &&
-                    flag_collector.test(static_cast<size_t>(flag));
+                return static_cast<size_t>(flag) < flag_collector.size() && flag_collector.test(static_cast<size_t>(flag));
             }
         };
 
@@ -15691,7 +16093,6 @@ public:
             core::last_detected_score = 0;
 
             const bool result = run_fn();
-
             const u8 points_to_add = (core::last_detected_score > 0) ? core::last_detected_score : pair.points;
 
             if (result) {
@@ -16026,10 +16427,7 @@ public:
         for (u8 i = technique_begin; i < technique_end; ++i) {
             const enum_flags technique_enum = static_cast<enum_flags>(i);
 
-            if (
-                (flags.test(technique_enum)) &&
-                (check(technique_enum))
-            ) {
+            if ((flags.test(technique_enum)) && (check(technique_enum))) {
                 tmp.push_back(technique_enum);
             }
         }
@@ -16267,13 +16665,13 @@ public:
         };
 
         if (core::is_enabled(flags, DYNAMIC)) {
-            if (percent_tmp == 0) { return "Running on bare metal"; }
+            if (percent_tmp == 0)  { return "Running on bare metal";        }
             if (percent_tmp <= 20) { return make_conclusion(very_unlikely); }
-            if (percent_tmp <= 35) { return make_conclusion(unlikely); }
-            if (percent_tmp < 50) { return make_conclusion(potentially); }
-            if (percent_tmp <= 62) { return make_conclusion(might); }
-            if (percent_tmp <= 75) { return make_conclusion(likely); }
-            if (percent_tmp < 100) { return make_conclusion(very_likely); }
+            if (percent_tmp <= 35) { return make_conclusion(unlikely);      }
+            if (percent_tmp < 50)  { return make_conclusion(potentially);   }
+            if (percent_tmp <= 62) { return make_conclusion(might);         }
+            if (percent_tmp <= 75) { return make_conclusion(likely);        }
+            if (percent_tmp < 100) { return make_conclusion(very_likely);   }
         }
 
         if (percent_tmp == 100) {
@@ -16334,6 +16732,7 @@ public:
 
                 return tmp;
             }();
+
             disabled_techniques = VM::disabled_techniques;
         }
 
@@ -16454,7 +16853,7 @@ std::array<VM::core::technique, VM::enum_size + 1> VM::core::technique_table = [
         #endif
 
         #if (LINUX || WINDOWS)
-            {VM::FIRMWARE, {150, VM::firmware}},
+            {VM::FIRMWARE, {100, VM::firmware}},
             {VM::DEVICES, {95, VM::pci_devices}},
             {VM::SYSTEM_REGISTERS, {50, VM::system_registers}},
             {VM::AZURE, {30, VM::azure}},
