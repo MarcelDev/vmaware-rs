@@ -5113,11 +5113,12 @@ public:
                         break;
                     }
                     const auto* const first_event = reinterpret_cast<const tcg_pcr_event_header*>(log_buffer);
-                    const size_t first_event_size = static_cast<size_t>(32) + first_event->event_data_size;
-                    if (first_event_size > log_size) {
+
+                    if (first_event->event_data_size > log_size - 32) {
                         parse_error = true;
                         break;
                     }
+                    const size_t first_event_size = static_cast<size_t>(32) + first_event->event_data_size;
                     const bool crypto_agile = (first_event->event_data_size >= 16 && memcmp(first_event->event_data, "Spec ID Event03", 15) == 0);
 
                     struct alg_size_pair {
@@ -5170,7 +5171,7 @@ public:
 
                     constexpr const wchar_t* hyperv_targets[] = {
                         L"hvix64.exe", L"hvax64.exe", L"hvloader.dll", L"securekernel.exe",
-                        L"winresume.efi", L"hiberresume.exe", L"hiberrsm.exe" /* If PC booted from hibernation, Hyper-V measurements won't be present */
+                        L"winresume.efi", L"hiberresume.exe", L"hiberrsm.exe"
                     };
 
                     const auto scan_targets = [&](const u32 pcr, const u32 event_size, const u8* const event_data) -> bool {
@@ -5186,10 +5187,13 @@ public:
                                     continue;
                                 }
 
-                                for (size_t i = 0; i <= event_size - len; i += 2) {
+                                for (size_t i = 0; i <= event_size - len; i += 1) {
                                     bool match = true;
                                     for (size_t j = 0; j < target_len; ++j) {
-                                        wchar_t log_char = static_cast<wchar_t>(event_data[i + (j * 2)] | (event_data[i + (j * 2) + 1] << 8));
+                                        const unsigned char low_byte = static_cast<unsigned char>(event_data[i + (j * 2)]);
+                                        const unsigned char high_byte = static_cast<unsigned char>(event_data[i + (j * 2) + 1]);
+
+                                        wchar_t log_char = static_cast<wchar_t>(low_byte | (high_byte << 8));
                                         wchar_t target_char = target[j];
 
                                         if (log_char >= L'A' && log_char <= L'Z') {
@@ -5247,17 +5251,16 @@ public:
                                 break;
                             }
                             const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + temp);
+
+                            if (event_size > log_size - temp - 4) {
+                                parse_error = true;
+                                break;
+                            }
                             const u8* const event_data = log_buffer + temp + 4;
                             offset = temp + 4 + event_size;
 
-                            if (offset <= log_size) {
-                                if (scan_targets(pcr, event_size, event_data)) {
-                                    found_hyperv = true;
-                                    break;
-                                }
-                            }
-                            else {
-                                parse_error = true;
+                            if (scan_targets(pcr, event_size, event_data)) {
+                                found_hyperv = true;
                                 break;
                             }
                         }
@@ -5268,17 +5271,16 @@ public:
                             }
                             const u32 pcr = *reinterpret_cast<const u32*>(log_buffer + offset);
                             const u32 event_size = *reinterpret_cast<const u32*>(log_buffer + offset + 28);
+
+                            if (event_size > log_size - offset - 32) {
+                                parse_error = true;
+                                break;
+                            }
                             const u8* const event_data = log_buffer + offset + 32;
                             offset += 32 + static_cast<unsigned long long>(event_size);
 
-                            if (offset <= log_size) {
-                                if (scan_targets(pcr, event_size, event_data)) {
-                                    found_hyperv = true;
-                                    break;
-                                }
-                            }
-                            else {
-                                parse_error = true;
+                            if (scan_targets(pcr, event_size, event_data)) {
+                                found_hyperv = true;
                                 break;
                             }
                         }
