@@ -12101,22 +12101,26 @@ public:
         }
 
         struct exception_handler {
-            static int execute(const unsigned int code, struct _EXCEPTION_POINTERS* ep, volatile ULONG_PTR* out_trap_ip) {
+            static int execute(const unsigned int code, struct _EXCEPTION_POINTERS* ep, volatile ULONG_PTR* out_trap_ip, volatile bool* out_anomaly) {
                 if (code == EXCEPTION_SINGLE_STEP && ep && ep->ContextRecord) {
                 #if (x86_64)
                     *out_trap_ip = ep->ContextRecord->Rip;
                 #else
-                    *out_trap_ip = ep->ContextRecord->Eip;
+                    * out_trap_ip = ep->ContextRecord->Eip;
                 #endif
                     ep->ContextRecord->EFlags &= ~0x100; /* clear TF to resume execution */
                     return EXCEPTION_CONTINUE_EXECUTION;
                 }
-                return EXCEPTION_CONTINUE_SEARCH;
+
+                *out_anomaly = true;
+                return EXCEPTION_EXECUTE_HANDLER;
             }
         };
 
         volatile ULONG_PTR trap_ip = 0;
+        volatile bool anomaly_detected = false;
         bool rdpru_available = false;
+
         if (cpu::is_amd()) {
             u32 a = 0, b = 0, c = 0, d = 0;
             cpu::cpuid(a, b, c, d, cpu::leaf::ext_limits);
@@ -12129,58 +12133,60 @@ public:
         ULONG_PTR baremetal_target_ip = 0;
 
         trap_ip = 0;
+        anomaly_detected = false;
         __try {
             __asm {
-                mov dword ptr[baremetal_target_ip], offset baremetal_target /* get exact bare metal trap target address dynamically */
+                mov dword ptr[baremetal_target_ip], offset baremetal_target
                 push ebx
                 xor eax, eax
                 mov ax, ss
                 pushfd
                 or dword ptr[esp], 0x100 /* set TF */
                 popfd
-                mov ss, ax /* this blocks any debug exception for exactly one instruction */
+                mov ss, ax
                 cpuid
                 baremetal_target :
-                pop ebx /* bare metal delays the #DB until here due to shadow suppression */
+                pop ebx
                     nop
                     pushfd
                     and dword ptr[esp], 0xFFFFFEFF
                     popfd
             }
         }
-        __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+        __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip, &anomaly_detected)) {}
 
-        if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+        if (anomaly_detected || trap_ip == 0 || trap_ip != baremetal_target_ip) {
             hypervisor_detected = true;
         }
 
         if (rdpru_available) {
-            trap_ip = 0; /* Reset trap_ip before the second run so that trap_ip is not overwritten if first run detects a hypervisor but second run doesn't */
+            trap_ip = 0;
+            anomaly_detected = false;
             __try {
                 __asm {
                     mov dword ptr[baremetal_target_ip], offset baremetal_target_rdpru
                     push ebx
-                    xor ecx, ecx /* Set ECX to index 0 (MPERF) to prevent #GP */
+                    xor ecx, ecx
                     xor eax, eax
                     mov ax, ss
                     pushfd
                     or dword ptr[esp], 0x100 /* set TF */
                     popfd
-                    mov ss, ax /* shadow starts */
+                    mov ss, ax
                     _emit 0x0F
                     _emit 0x01
                     _emit 0xFD
                     baremetal_target_rdpru :
-                    pop ebx /* bare metal delays the #DB until here */
+                    pop ebx
                         nop
                         pushfd
                         and dword ptr[esp], 0xFFFFFEFF
                         popfd
                 }
             }
-            __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+            __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip, &anomaly_detected)) {}
 
-            if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+            if (anomaly_detected || trap_ip == 0 || trap_ip != baremetal_target_ip) {
                 hypervisor_detected = true;
             }
         }
@@ -12192,25 +12198,27 @@ public:
         ULONG_PTR baremetal_target_ip = 0;
 
         trap_ip = 0;
+        anomaly_detected = false;
         baremetal_target_ip = reinterpret_cast<ULONG_PTR>(cpuid_blockstep_stub) + 18;
         __try {
             memory::execute(cpuid_blockstep_stub);
         }
-        __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+        __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip, &anomaly_detected)) {}
 
-        if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+        if (anomaly_detected || trap_ip == 0 || trap_ip != baremetal_target_ip) {
             hypervisor_detected = true;
         }
 
         if (rdpru_available) {
-            trap_ip = 0; 
+            trap_ip = 0;
+            anomaly_detected = false;
             baremetal_target_ip = reinterpret_cast<ULONG_PTR>(rdpru_blockstep_stub) + 21;
             __try {
                 memory::execute(rdpru_blockstep_stub);
             }
-            __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip)) {}
+            __except (exception_handler::execute(GetExceptionCode(), GetExceptionInformation(), &trap_ip, &anomaly_detected)) {}
 
-            if (trap_ip == 0 || trap_ip != baremetal_target_ip) {
+            if (anomaly_detected || trap_ip == 0 || trap_ip != baremetal_target_ip) {
                 hypervisor_detected = true;
             }
         }
